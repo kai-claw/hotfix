@@ -28,11 +28,20 @@ export interface LoopRoute extends ScoredRoute {
 /** Minimum floorability score to present a route (Fix 3) */
 const MIN_FLOORABILITY_SCORE = 25
 
-// Radius in miles for each duration target
+// Radius in miles for out-and-back / triangle loops (single waypoint target distance)
 const DURATION_RADIUS: Record<LoopDuration, number> = {
   15: 5,
   30: 12,
   60: 22,
+}
+
+// Radius in miles for 4-waypoint circular loops
+// Empirically tested: road network adds ~2.5x winding factor
+// r=1.0mi → ~26min, r=1.5mi → ~37min, r=2.0mi → ~39min
+const LOOP_RADIUS: Record<LoopDuration, number> = {
+  15: 0.6,
+  30: 1.3,
+  60: 2.5,
 }
 
 /**
@@ -393,7 +402,8 @@ export async function generateLoopRoutes(
   onProgress?: (stage: string, progress: number) => void,
   loopType: LoopType = 'anchor'
 ): Promise<LoopRoute[]> {
-  const radius = DURATION_RADIUS[duration]
+  const loopRadius = LOOP_RADIUS[duration]
+  const triRadius = DURATION_RADIUS[duration]
   const targetDurationSec = duration * 60
 
   // For "nearby" mode, generate loops from different start points in the area
@@ -406,16 +416,16 @@ export async function generateLoopRoutes(
   const candidates: { route: MapboxRoute; waypoints: [number, number][]; method: string }[] = []
 
   // ── FIX 2C: 4-waypoint loops at 90° intervals ──
-  // Generate cardinal-direction waypoint sets at different radii
+  // Use LOOP_RADIUS (smaller, tuned for circular loops)
   const quadConfigs = [
+    { angles: [0, 90, 180, 270], radiusFrac: 1.0, label: 'cardinal-100' },
+    { angles: [45, 135, 225, 315], radiusFrac: 1.0, label: 'diagonal-100' },
     { angles: [0, 90, 180, 270], radiusFrac: 0.7, label: 'cardinal-70' },
+    { angles: [30, 120, 210, 300], radiusFrac: 0.85, label: 'offset-85' },
+    { angles: [0, 90, 180, 270], radiusFrac: 1.3, label: 'cardinal-130' },
     { angles: [45, 135, 225, 315], radiusFrac: 0.7, label: 'diagonal-70' },
-    { angles: [0, 90, 180, 270], radiusFrac: 0.5, label: 'cardinal-50' },
-    { angles: [30, 120, 210, 300], radiusFrac: 0.6, label: 'offset-60' },
-    { angles: [0, 90, 180, 270], radiusFrac: 0.4, label: 'cardinal-40' },
-    { angles: [45, 135, 225, 315], radiusFrac: 0.5, label: 'diagonal-50' },
-    { angles: [15, 105, 195, 285], radiusFrac: 0.8, label: 'rotated-80' },
-    { angles: [60, 150, 240, 330], radiusFrac: 0.6, label: 'wide-offset-60' },
+    { angles: [15, 105, 195, 285], radiusFrac: 1.15, label: 'rotated-115' },
+    { angles: [60, 150, 240, 330], radiusFrac: 0.85, label: 'wide-offset-85' },
   ]
 
   // ── FIX 2A: Use trip endpoint for round-trip optimization ──
@@ -425,7 +435,7 @@ export async function generateLoopRoutes(
   for (let i = 0; i < quadConfigs.length; i += 4) {
     const batch = quadConfigs.slice(i, i + 4)
     const batchWps = batch.map((config) =>
-      generateWaypoints(start, radius * config.radiusFrac, config.angles)
+      generateWaypoints(start, loopRadius * config.radiusFrac, config.angles)
     )
     const results = await Promise.all(
       batch.map((config, j) =>
@@ -441,17 +451,18 @@ export async function generateLoopRoutes(
   }
 
   // Also try a few 3-waypoint triangle loops via regular route (for variety)
+  // These use the larger DURATION_RADIUS since triangles have fewer waypoints
   onProgress?.('Exploring triangle loops...', 0.28)
 
   const triConfigs = [
-    { angles: [0, 120, 240], radiusFrac: 0.55 },
-    { angles: [60, 180, 300], radiusFrac: 0.55 },
-    { angles: [30, 150, 270], radiusFrac: 0.65 },
-    { angles: [90, 210, 330], radiusFrac: 0.5 },
+    { angles: [0, 120, 240], radiusFrac: 0.35 },
+    { angles: [60, 180, 300], radiusFrac: 0.35 },
+    { angles: [30, 150, 270], radiusFrac: 0.45 },
+    { angles: [90, 210, 330], radiusFrac: 0.30 },
   ]
 
   const triWps = triConfigs.map((config) =>
-    generateWaypoints(start, radius * config.radiusFrac, config.angles)
+    generateWaypoints(start, triRadius * config.radiusFrac, config.angles)
   )
   const triRoutes = await Promise.all(
     triConfigs.map((_, j) => fetchLoopRoute(start, triWps[j]))
@@ -561,8 +572,9 @@ async function generateNearbyLoopRoutes(
   duration: LoopDuration,
   onProgress?: (stage: string, progress: number) => void
 ): Promise<LoopRoute[]> {
-  const radius = DURATION_RADIUS[duration]
-  const nearbyStarts = generateNearbyStartPoints(center, radius)
+  const loopRadius = LOOP_RADIUS[duration]
+  const triRadius = DURATION_RADIUS[duration]
+  const nearbyStarts = generateNearbyStartPoints(center, loopRadius * 2) // scatter starts around the area
 
   onProgress?.('Finding nearby loops...', 0.1)
 
@@ -574,15 +586,15 @@ async function generateNearbyLoopRoutes(
 
     onProgress?.(`Exploring area ${s + 1}/${nearbyStarts.length}...`, 0.1 + (s / nearbyStarts.length) * 0.3)
 
-    // 4-waypoint trip loop
-    const wps4 = generateWaypoints(loopStart, radius * 0.5, [0, 90, 180, 270])
+    // 4-waypoint trip loop using proper circular radius
+    const wps4 = generateWaypoints(loopStart, loopRadius, [0, 90, 180, 270])
     const tripResult4 = await fetchTripRoute(loopStart, wps4)
     if (tripResult4) {
       allCandidates.push({ route: tripResult4, waypoints: wps4, method: 'nearby-trip' })
     }
 
     // Also try a 3-waypoint route loop for variety
-    const wps3 = generateWaypoints(loopStart, radius * 0.6, [0, 120, 240])
+    const wps3 = generateWaypoints(loopStart, triRadius * 0.35, [0, 120, 240])
     const routeResult3 = await fetchLoopRoute(loopStart, wps3)
     if (routeResult3) {
       allCandidates.push({ route: routeResult3, waypoints: wps3, method: 'nearby-route' })
