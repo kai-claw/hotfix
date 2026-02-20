@@ -10,66 +10,101 @@
 import type { ScoredRoute } from '../types/route'
 
 /**
- * Sample waypoints along a route for navigation export.
- * Navigation apps have URL length limits, so we pick key waypoints.
+ * Sample waypoints along a route, emphasizing key turns and direction changes.
+ * More points = more accurate route reproduction in nav apps.
  */
 function sampleWaypoints(
   coords: [number, number][],
-  maxPoints: number = 8
+  maxPoints: number = 15
 ): [number, number][] {
   if (coords.length <= maxPoints) return coords
 
-  const step = Math.floor(coords.length / maxPoints)
-  const sampled: [number, number][] = []
-  for (let i = 0; i < coords.length; i += step) {
-    sampled.push(coords[i])
-    if (sampled.length >= maxPoints) break
+  // Always include start and end
+  const result: [number, number][] = [coords[0]]
+
+  // Pick points at regular intervals plus points where direction changes significantly
+  const step = Math.max(1, Math.floor(coords.length / (maxPoints - 2)))
+
+  for (let i = step; i < coords.length - 1; i += step) {
+    // Check if there's a significant turn near this point
+    let bestIdx = i
+    let bestAngleChange = 0
+    const searchRadius = Math.min(step, 20)
+
+    for (let j = Math.max(1, i - searchRadius); j < Math.min(coords.length - 1, i + searchRadius); j++) {
+      if (j < 1 || j >= coords.length - 1) continue
+      const angle1 = Math.atan2(
+        coords[j][1] - coords[j - 1][1],
+        coords[j][0] - coords[j - 1][0]
+      )
+      const angle2 = Math.atan2(
+        coords[j + 1][1] - coords[j][1],
+        coords[j + 1][0] - coords[j][0]
+      )
+      let change = Math.abs(angle2 - angle1)
+      if (change > Math.PI) change = 2 * Math.PI - change
+      if (change > bestAngleChange) {
+        bestAngleChange = change
+        bestIdx = j
+      }
+    }
+
+    result.push(coords[bestIdx])
+    if (result.length >= maxPoints - 1) break
   }
-  return sampled
+
+  // Always include the last point
+  result.push(coords[coords.length - 1])
+
+  return result
 }
 
 /**
  * Generate Apple Maps URL
- * Uses the maps:// scheme which opens Apple Maps on iOS/macOS
- * Falls back to maps.apple.com for web
+ * Uses maps.apple.com which opens Apple Maps app on iOS
  */
 export function getAppleMapsUrl(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
   if (coords.length < 2) return ''
 
   const start = coords[0]
+  // Use more waypoints for accuracy (Apple Maps handles long URLs well)
+  const waypoints = sampleWaypoints(coords, 15)
 
-  // Apple Maps supports dirflg=d (driving) and waypoints via daddr
-  // Format: maps://maps.apple.com/?saddr=lat,lng&daddr=lat,lng+to:lat,lng+to:...
-  const waypoints = sampleWaypoints(coords, 8)
-
-  // Build the waypoint chain: first waypoint is destination, rest are via points
-  // Apple Maps: daddr = wp1+to:wp2+to:wp3+to:...+to:final
   const waypointStr = waypoints
-    .slice(1) // skip start (that's saddr)
+    .slice(1)
     .map(([lng, lat]) => `${lat},${lng}`)
     .join('+to:')
 
-  // Use maps.apple.com for universal compatibility (redirects to app on iOS)
   return `https://maps.apple.com/?saddr=${start[1]},${start[0]}&daddr=${waypointStr}&dirflg=d`
 }
 
 /**
  * Generate Google Maps URL
- * Uses the maps.google.com/maps/dir/ scheme
+ * Google Maps supports waypoints in the URL
  */
 export function getGoogleMapsUrl(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
   if (coords.length < 2) return ''
 
-  const waypoints = sampleWaypoints(coords, 8)
+  // Google Maps URL has a length limit (~2048 chars) so we need fewer points
+  // but use the turn-detection sampling for better accuracy
+  const waypoints = sampleWaypoints(coords, 10)
 
-  // Google Maps: /maps/dir/lat,lng/lat,lng/lat,lng/...
-  const pathStr = waypoints
-    .map(([lng, lat]) => `${lat},${lng}`)
-    .join('/')
+  const start = waypoints[0]
+  const end = waypoints[waypoints.length - 1]
+  const mid = waypoints.slice(1, -1)
 
-  return `https://www.google.com/maps/dir/${pathStr}/@${waypoints[0][1]},${waypoints[0][0]},12z/data=!4m2!4m1!3e0`
+  // Use the Google Maps directions URL with waypoints parameter
+  const origin = `${start[1]},${start[0]}`
+  const destination = `${end[1]},${end[0]}`
+
+  if (mid.length > 0) {
+    const waypointStr = mid.map(([lng, lat]) => `${lat},${lng}`).join('|')
+    return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypointStr)}&travelmode=driving`
+  }
+
+  return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=driving`
 }
 
 /**
@@ -79,8 +114,7 @@ export function getWazeUrl(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
   if (coords.length < 2) return ''
 
-  // Waze navigate to a point (supports single destination)
-  // For loops, navigate to the farthest waypoint
+  // Waze only supports single destination - use the farthest waypoint
   const midIdx = Math.floor(coords.length / 2)
   const mid = coords[midIdx]
 
@@ -89,7 +123,7 @@ export function getWazeUrl(route: ScoredRoute): string {
 
 /**
  * Generate GPX file content
- * GPX is the universal format — works with Garmin, Sygic, OsmAnd, etc.
+ * GPX is the most accurate — includes every coordinate
  */
 export function generateGpx(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
@@ -100,11 +134,11 @@ export function generateGpx(route: ScoredRoute): string {
     .map(([lng, lat]) => `      <trkpt lat="${lat}" lon="${lng}"></trkpt>`)
     .join('\n')
 
-  // Also add key waypoints for navigation
-  const waypoints = sampleWaypoints(coords, 12)
+  // Add waypoints at key turns for navigation guidance
+  const waypoints = sampleWaypoints(coords, 20)
   const waypointXml = waypoints
     .map(([lng, lat], i) => {
-      const wpName = i === 0 ? 'Start' : i === waypoints.length - 1 ? 'End' : `WP ${i}`
+      const wpName = i === 0 ? 'Start' : i === waypoints.length - 1 ? 'End' : `Turn ${i}`
       return `  <wpt lat="${lat}" lon="${lng}">\n    <name>${wpName}</name>\n  </wpt>`
     })
     .join('\n')

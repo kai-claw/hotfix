@@ -21,9 +21,14 @@ function scoreLabel(score: number): string {
 }
 
 export default function FloorabilityBadge({ floorability, compact = false }: FloorabilityBadgeProps) {
-  const { totalScore } = floorability
+  const { totalScore, events } = floorability
   const color = scoreColor(totalScore)
   const label = scoreLabel(totalScore)
+
+  // Count events by type
+  const speedDeltas = events.filter((e) => e.type === 'speed_delta').length
+  const signalLaunches = events.filter((e) => e.type === 'signal_launch').length
+  const rampMerges = events.filter((e) => e.type === 'ramp_merge').length
 
   if (compact) {
     return (
@@ -60,7 +65,7 @@ export default function FloorabilityBadge({ floorability, compact = false }: Flo
           </div>
         </div>
         <span className="text-xs text-[#6a6a8a]">
-          {floorability.floorItCount} event{floorability.floorItCount !== 1 ? 's' : ''}
+          {floorability.floorItCount} zone{floorability.floorItCount !== 1 ? 's' : ''}
         </span>
       </div>
 
@@ -76,11 +81,18 @@ export default function FloorabilityBadge({ floorability, compact = false }: Flo
         />
       </div>
 
-      {/* Sub-scores */}
-      <div className="grid grid-cols-3 gap-1.5">
-        <SubScore label="Speed Δ" score={floorability.speedDeltaScore} icon="⚡" />
-        <SubScore label="Launches" score={floorability.signalLaunchScore} icon="🚦" />
-        <SubScore label="Merges" score={floorability.rampMergeScore} icon="🛣️" />
+      {/* Event breakdown — actual counts by type */}
+      <div className="grid grid-cols-3 gap-1 mb-2">
+        <EventCount icon="🚀" label="Speed Δ" count={speedDeltas} color="#ff2d55" />
+        <EventCount icon="🚦" label="Launches" count={signalLaunches} color="#ffb800" />
+        <EventCount icon="🛣️" label="Merges" count={rampMerges} color="#00d4ff" />
+      </div>
+
+      {/* Sub-scores bar chart */}
+      <div className="space-y-1">
+        <ScoreBar label="Speed Δ" score={floorability.speedDeltaScore} color="#ff2d55" />
+        <ScoreBar label="Launches" score={floorability.signalLaunchScore} color="#ffb800" />
+        <ScoreBar label="Merges" score={floorability.rampMergeScore} color="#00d4ff" />
       </div>
 
       {/* Best moment */}
@@ -93,12 +105,37 @@ export default function FloorabilityBadge({ floorability, compact = false }: Flo
   )
 }
 
-function SubScore({ label, score, icon }: { label: string; score: number; icon: string }) {
+function EventCount({ icon, label, count, color }: { icon: string; label: string; count: number; color: string }) {
   return (
-    <div className="flex items-center gap-1 text-[10px]">
-      <span>{icon}</span>
-      <span className="text-[#6a6a8a]">{label}</span>
-      <span className="font-bold text-[#a0a0b0] ml-auto">{score}</span>
+    <div className="flex flex-col items-center gap-0.5 py-1 rounded-lg" style={{ backgroundColor: count > 0 ? `${color}08` : 'transparent' }}>
+      <div className="flex items-center gap-1">
+        <span className="text-xs">{icon}</span>
+        <span className="text-sm font-black tabular-nums" style={{ color: count > 0 ? color : '#4a4a5a' }}>
+          {count}
+        </span>
+      </div>
+      <span className="text-[8px] uppercase tracking-wider text-[#6a6a8a]">{label}</span>
+    </div>
+  )
+}
+
+function ScoreBar({ label, score, color }: { label: string; score: number; color: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[9px] text-[#6a6a8a] w-14 text-right">{label}</span>
+      <div className="flex-1 h-1 rounded-full bg-[#1a1a2e] overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all duration-500"
+          style={{
+            width: `${Math.min(100, score)}%`,
+            background: score > 0 ? color : 'transparent',
+            opacity: 0.7,
+          }}
+        />
+      </div>
+      <span className="text-[9px] font-bold tabular-nums w-6 text-right" style={{ color: score > 30 ? color : '#4a4a5a' }}>
+        {score}
+      </span>
     </div>
   )
 }

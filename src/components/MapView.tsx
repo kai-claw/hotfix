@@ -182,6 +182,9 @@ export default function MapView() {
           }
         } else {
           // ── Normal solid-color route ──
+          // When a route IS selected, heavily dim the others so they don't distract
+          const hasSelection = selectedRouteId !== null
+
           const outlineId = `${sourceId}-outline`
           if (!map.getLayer(outlineId)) {
             map.addLayer({
@@ -191,8 +194,8 @@ export default function MapView() {
               layout: { 'line-join': 'round', 'line-cap': 'round' },
               paint: {
                 'line-color': route.color,
-                'line-width': isSelected ? 12 : 6,
-                'line-opacity': isSelected ? 0.2 : 0.05,
+                'line-width': isSelected ? 12 : 4,
+                'line-opacity': isSelected ? 0.2 : (hasSelection ? 0.02 : 0.05),
                 'line-blur': 8,
               },
             })
@@ -210,8 +213,8 @@ export default function MapView() {
               },
               paint: {
                 'line-color': route.color,
-                'line-width': isSelected ? 5 : 3,
-                'line-opacity': isSelected ? 1 : 0.35,
+                'line-width': isSelected ? 5 : (hasSelection ? 2 : 3),
+                'line-opacity': isSelected ? 1 : (hasSelection ? 0.12 : 0.35),
               },
             })
           }
@@ -354,8 +357,28 @@ function createEventMarkerElement(event: FloorItEvent, _index: number): HTMLDivE
     cursor: pointer;
     transition: transform 0.2s, box-shadow 0.2s;
     z-index: 10;
+    pointer-events: auto;
   `
   el.textContent = emoji
+
+  // Prevent marker from disappearing — keep it visible regardless of popup state
+  const observer = new MutationObserver(() => {
+    const parent = el.closest('.maplibregl-marker') as HTMLElement | null
+    if (parent && parent.style.display === 'none') {
+      parent.style.display = ''
+    }
+    if (parent && parent.style.visibility === 'hidden') {
+      parent.style.visibility = 'visible'
+    }
+  })
+  // Observe once the element is in the DOM
+  requestAnimationFrame(() => {
+    const parent = el.closest('.maplibregl-marker')
+    if (parent) {
+      observer.observe(parent, { attributes: true, attributeFilter: ['style'] })
+    }
+  })
+
   el.onmouseenter = () => {
     el.style.transform = 'scale(1.3)'
     el.style.boxShadow = `0 0 20px ${color}80, 0 0 8px ${color}60`
