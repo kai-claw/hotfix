@@ -1,12 +1,17 @@
 import SearchBar from './SearchBar'
 import { useRouteStore } from '../store/routeStore'
 import { useIsMobile } from '../hooks/useMediaQuery'
-import type { LoopDuration } from '../lib/loopRouter'
+import type { LoopDuration, LoopType } from '../lib/loopRouter'
 
 const DURATION_OPTIONS: { value: LoopDuration; label: string }[] = [
   { value: 15, label: '15m' },
   { value: 30, label: '30m' },
   { value: 60, label: '60m' },
+]
+
+const LOOP_TYPE_OPTIONS: { value: LoopType; label: string; icon: string }[] = [
+  { value: 'anchor', label: 'Anchor', icon: '📍' },
+  { value: 'nearby', label: 'Nearby', icon: '🔍' },
 ]
 
 export default function Header() {
@@ -16,7 +21,9 @@ export default function Header() {
     originName,
     destinationName,
     loopDuration,
+    loopType,
     setLoopDuration,
+    setLoopType,
     setOrigin,
     setDestination,
     swapLocations,
@@ -60,23 +67,43 @@ export default function Header() {
             </button>
           </div>
 
-          {/* Loop duration pills (only in loop mode) */}
+          {/* Loop controls (only in loop mode) */}
           {mode === 'loop' && (
-            <div className="flex bg-[#1a1a2e]/90 backdrop-blur-md rounded-xl border border-[#2a2a3e] p-0.5">
-              {DURATION_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => setLoopDuration(opt.value)}
-                  className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    loopDuration === opt.value
-                      ? 'bg-[#ffb800] text-black'
-                      : 'text-[#6a6a8a] hover:text-white'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
+            <>
+              {/* Loop type: Anchor vs Nearby */}
+              <div className="flex bg-[#1a1a2e]/90 backdrop-blur-md rounded-xl border border-[#2a2a3e] p-0.5">
+                {LOOP_TYPE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setLoopType(opt.value)}
+                    className={`px-2 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                      loopType === opt.value
+                        ? 'bg-[#a855f7] text-white'
+                        : 'text-[#6a6a8a] hover:text-white'
+                    }`}
+                  >
+                    {opt.icon} {!isMobile && opt.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Duration pills */}
+              <div className="flex bg-[#1a1a2e]/90 backdrop-blur-md rounded-xl border border-[#2a2a3e] p-0.5">
+                {DURATION_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setLoopDuration(opt.value)}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                      loopDuration === opt.value
+                        ? 'bg-[#ffb800] text-black'
+                        : 'text-[#6a6a8a] hover:text-white'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </>
           )}
         </div>
 

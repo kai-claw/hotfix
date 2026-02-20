@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { RoutePoint, ScoredRoute, RouteLoadingState } from '../types/route'
 import { fetchRoutes } from '../lib/mapbox'
-import { generateLoopRoutes, type LoopDuration, type LoopStyle, type LoopRoute } from '../lib/loopRouter'
+import { generateLoopRoutes, type LoopDuration, type LoopStyle, type LoopType, type LoopRoute } from '../lib/loopRouter'
 
 type AppMode = 'ab' | 'loop'
 
@@ -19,8 +19,10 @@ interface RouteState {
   // Loop settings
   loopDuration: LoopDuration
   loopStyle: LoopStyle
+  loopType: LoopType
   setLoopDuration: (d: LoopDuration) => void
   setLoopStyle: (s: LoopStyle) => void
+  setLoopType: (t: LoopType) => void
 
   // Routes
   routes: ScoredRoute[]
@@ -49,6 +51,7 @@ export const useRouteStore = create<RouteState>((set, get) => ({
   destinationName: '',
   loopDuration: 30,
   loopStyle: 'best',
+  loopType: 'anchor',
   routes: [],
   loopRoutes: [],
   selectedRouteId: null,
@@ -71,6 +74,14 @@ export const useRouteStore = create<RouteState>((set, get) => ({
 
   setLoopStyle: (s) => {
     set({ loopStyle: s })
+    const state = get()
+    if (state.mode === 'loop' && state.origin) {
+      void get().calculateLoopRoutes()
+    }
+  },
+
+  setLoopType: (t) => {
+    set({ loopType: t })
     const state = get()
     if (state.mode === 'loop' && state.origin) {
       void get().calculateLoopRoutes()
@@ -120,7 +131,7 @@ export const useRouteStore = create<RouteState>((set, get) => ({
   },
 
   calculateLoopRoutes: async () => {
-    const { origin, loopDuration, loopStyle } = get()
+    const { origin, loopDuration, loopStyle, loopType } = get()
     if (!origin) return
 
     set({
@@ -140,7 +151,8 @@ export const useRouteStore = create<RouteState>((set, get) => ({
         loopStyle,
         (stage, progress) => {
           set({ loadingStage: stage, loadingProgress: progress })
-        }
+        },
+        loopType
       )
       set({
         loopRoutes: loops,

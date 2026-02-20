@@ -10,11 +10,13 @@ import { analyzeFloorability, queryOverpass, type FloorabilityResult } from './f
 
 export type LoopDuration = 15 | 30 | 60
 export type LoopStyle = 'highway' | 'backroad' | 'mixed' | 'best'
+export type LoopType = 'anchor' | 'nearby'
 
 export interface LoopRoute extends ScoredRoute {
   floorability: FloorabilityResult
   loopStyle: string
   waypoints: [number, number][]
+  overlapPenalty: number // 0-1, how much road is reused (0 = no overlap, 1 = full U-turn)
 }
 
 // Radius in miles for each duration target
@@ -166,27 +168,103 @@ const ROUTE_COLORS = [
 ]
 
 /**
+ * Calculate road overlap / U-turn penalty for a loop route.
+ * Compares the first half of the route with the second half (reversed)
+ * to detect if the return path reuses the same roads.
+ * Returns 0 (no overlap) to 1 (complete U-turn).
+ */
+function calculateOverlapPenalty(coords: [number, number][]): number {
+  if (coords.length < 10) return 0
+
+  const mid = Math.floor(coords.length / 2)
+  const outbound = coords.slice(0, mid)
+  const inbound = coords.slice(mid).reverse() // reverse so we compare same direction
+
+  // For each outbound point, find if there's an inbound point within ~100m (0.06mi)
+  const OVERLAP_THRESHOLD = 0.0008 // ~90m in degrees at mid-latitudes
+  let overlapCount = 0
+  const sampleStep = Math.max(1, Math.floor(outbound.length / 50)) // sample up to 50 points
+
+  for (let i = 0; i < outbound.length; i += sampleStep) {
+    const [oLng, oLat] = outbound[i]
+    for (let j = 0; j < inbound.length; j += sampleStep) {
+      const [iLng, iLat] = inbound[j]
+      const dLat = Math.abs(oLat - iLat)
+      const dLng = Math.abs(oLng - iLng)
+      if (dLat < OVERLAP_THRESHOLD && dLng < OVERLAP_THRESHOLD) {
+        overlapCount++
+        break // found a match for this outbound point, move on
+      }
+    }
+  }
+
+  const totalSampled = Math.ceil(outbound.length / sampleStep)
+  return totalSampled > 0 ? overlapCount / totalSampled : 0
+}
+
+/**
+ * Generate nearby loop starting points (for "Nearby" mode).
+ * Instead of looping from user's exact position, find interesting
+ * starting points in the area and generate loops from each.
+ */
+function generateNearbyStartPoints(
+  center: [number, number],
+  radiusMi: number
+): [number, number][] {
+  const [lng, lat] = center
+  const latPerMile = 1 / 69
+  const lngPerMile = 1 / (69 * Math.cos(lat * Math.PI / 180))
+
+  // Generate 6 start points at varied distances and angles
+  const nearbyAngles = [30, 90, 150, 210, 270, 330]
+  const nearbyDistances = [0.4, 0.5, 0.6, 0.35, 0.55, 0.45] // fraction of radius
+
+  return nearbyAngles.map((angle, i) => {
+    const dist = radiusMi * nearbyDistances[i]
+    const rad = (angle * Math.PI) / 180
+    const dLat = Math.cos(rad) * dist * latPerMile
+    const dLng = Math.sin(rad) * dist * lngPerMile
+    return [lng + dLng, lat + dLat] as [number, number]
+  })
+}
+
+/**
  * Generate and score loop routes from a starting point
  */
 export async function generateLoopRoutes(
   start: [number, number], // [lng, lat]
   duration: LoopDuration = 30,
   _style: LoopStyle = 'best',
-  onProgress?: (stage: string, progress: number) => void
+  onProgress?: (stage: string, progress: number) => void,
+  loopType: LoopType = 'anchor'
 ): Promise<LoopRoute[]> {
   const radius = DURATION_RADIUS[duration]
   const targetDurationSec = duration * 60
 
+  // For "nearby" mode, generate loops from different start points in the area
+  if (loopType === 'nearby') {
+    return generateNearbyLoopRoutes(start, duration, onProgress)
+  }
+
   // Stage 1: Generate waypoints
   onProgress?.('Generating waypoints...', 0.1)
 
-  // Single-waypoint loops (8 directions)
+  // Use 3-waypoint loops to force variety and prevent U-turns
+  // Instead of start→wp→start (which often U-turns), use start→wp1→wp2→start
   const singleWps = generateWaypoints(start, radius, WAYPOINT_ANGLES)
 
-  // Double-waypoint loops for variety (pairs of nearby angles)
+  // Double-waypoint loops for proper circles
   const doubleWps: [number, number][][] = []
   const shortRadius = radius * 0.6
   const extraWps = generateWaypoints(start, shortRadius, EXTRA_ANGLES)
+  // Create pairs that form arcs (opposite-ish angles for proper loops)
+  for (let i = 0; i < WAYPOINT_ANGLES.length; i++) {
+    const wpA = generateWaypoints(start, radius * 0.7, [WAYPOINT_ANGLES[i]])[0]
+    const nextAngle = WAYPOINT_ANGLES[(i + 2) % WAYPOINT_ANGLES.length] // skip one for wider arc
+    const wpB = generateWaypoints(start, radius * 0.5, [nextAngle])[0]
+    doubleWps.push([wpA, wpB])
+  }
+  // Also add some with extra angles
   for (let i = 0; i < extraWps.length; i += 2) {
     if (i + 1 < extraWps.length) {
       doubleWps.push([extraWps[i], extraWps[i + 1]])
@@ -254,6 +332,57 @@ export async function generateLoopRoutes(
   return scoreCandidates(topCandidates, start, onProgress)
 }
 
+/**
+ * Generate loops from nearby starting points (Nearby mode)
+ */
+async function generateNearbyLoopRoutes(
+  center: [number, number],
+  duration: LoopDuration,
+  onProgress?: (stage: string, progress: number) => void
+): Promise<LoopRoute[]> {
+  const radius = DURATION_RADIUS[duration]
+  const nearbyStarts = generateNearbyStartPoints(center, radius)
+
+  onProgress?.('Finding nearby loops...', 0.1)
+
+  const allCandidates: { route: MapboxRoute; waypoints: [number, number][]; loopStart: [number, number] }[] = []
+
+  // For each nearby start point, generate 2-3 loop candidates
+  for (let s = 0; s < nearbyStarts.length; s++) {
+    const loopStart = nearbyStarts[s]
+    const angles = [0, 120, 240] // 3 directions per start point
+    const wps = generateWaypoints(loopStart, radius * 0.6, angles)
+
+    onProgress?.(`Exploring area ${s + 1}/${nearbyStarts.length}...`, 0.1 + (s / nearbyStarts.length) * 0.3)
+
+    const results = await Promise.all(
+      wps.map((wp) => fetchLoopRoute(loopStart, [wp]))
+    )
+    results.forEach((route, j) => {
+      if (route) {
+        allCandidates.push({ route, waypoints: [wps[j]], loopStart })
+      }
+    })
+  }
+
+  const targetDurationSec = duration * 60
+  const minDuration = targetDurationSec * 0.5
+  const maxDuration = targetDurationSec * 1.8
+
+  const filtered = allCandidates
+    .filter((c) => c.route.duration >= minDuration && c.route.duration <= maxDuration)
+    .sort((a, b) => Math.abs(a.route.duration - targetDurationSec) - Math.abs(b.route.duration - targetDurationSec))
+    .slice(0, 6)
+
+  if (filtered.length === 0) {
+    throw new Error('Could not find any good loops in this area. Try a different location or duration.')
+  }
+
+  // Score them using the same pipeline, but pass the loop start (not user's position)
+  const asPlain = filtered.map((c) => ({ route: c.route, waypoints: c.waypoints }))
+  return scoreCandidates(asPlain, center, onProgress)
+}
+
 async function scoreCandidates(
   candidates: { route: MapboxRoute; waypoints: [number, number][] }[],
   start: [number, number],
@@ -291,6 +420,19 @@ async function scoreCandidates(
       }
     }
 
+    // Calculate overlap / U-turn penalty
+    const overlapPenalty = calculateOverlapPenalty(route.geometry.coordinates)
+
+    // Apply overlap penalty to floorability score
+    // Heavy overlap (>60%) = major penalty, mild overlap (<20%) = minor
+    if (overlapPenalty > 0.15) {
+      const penaltyMultiplier = 1 - (overlapPenalty * 0.5) // 50% overlap = 25% score reduction
+      floorability.totalScore = Math.round(floorability.totalScore * penaltyMultiplier)
+      if (overlapPenalty > 0.4) {
+        floorability.bestMoment = `⚠️ ${Math.round(overlapPenalty * 100)}% road overlap (U-turn route). ${floorability.bestMoment}`
+      }
+    }
+
     const durationMin = Math.round(route.duration / 60)
     const name = nameLoopRoute(floorability, i)
 
@@ -303,10 +445,11 @@ async function scoreCandidates(
       deltaMin: 0, // will be set below
       isFastest: false,
       color: ROUTE_COLORS[i % ROUTE_COLORS.length],
-      highlights: generateLoopHighlights(floorability, durationMin),
+      highlights: generateLoopHighlights(floorability, durationMin, overlapPenalty),
       floorability,
       loopStyle: categorizeLoop(floorability),
       waypoints: [start, ...waypoints],
+      overlapPenalty,
     })
 
     // Small delay between Overpass queries to be respectful
@@ -350,7 +493,7 @@ function categorizeLoop(f: FloorabilityResult): string {
   return 'Mixed'
 }
 
-function generateLoopHighlights(f: FloorabilityResult, durationMin: number): string[] {
+function generateLoopHighlights(f: FloorabilityResult, durationMin: number, overlapPenalty: number = 0): string[] {
   const highlights: string[] = []
 
   if (f.floorItCount > 0) {
@@ -380,6 +523,12 @@ function generateLoopHighlights(f: FloorabilityResult, durationMin: number): str
   }
   if (rampEvents.length > 0) {
     highlights.push(`${rampEvents.length} highway merge${rampEvents.length !== 1 ? 's' : ''}`)
+  }
+
+  if (overlapPenalty > 0.3) {
+    highlights.push(`⚠️ ${Math.round(overlapPenalty * 100)}% road overlap`)
+  } else if (overlapPenalty < 0.1) {
+    highlights.push('✅ Unique outbound & return roads')
   }
 
   highlights.push(`~${durationMin} min loop`)

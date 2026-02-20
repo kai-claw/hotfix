@@ -2,6 +2,7 @@ import type { ScoredRoute } from '../types/route'
 import type { LoopRoute } from '../lib/loopRouter'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import FloorabilityBadge from './FloorabilityBadge'
+import ExportMenu from './ExportMenu'
 
 interface RouteCardProps {
   route: ScoredRoute
@@ -62,6 +63,11 @@ export default function RouteCard({
               <span style={{ color: route.color }} className="opacity-60">✦ </span>
               {route.highlights[0]}
             </span>
+          )}
+          {isSelected && (
+            <div className="ml-auto" onClick={(e) => e.stopPropagation()}>
+              <ExportMenu route={route} />
+            </div>
           )}
         </div>
       </button>
@@ -144,6 +150,18 @@ export default function RouteCard({
               {h}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Export button (selected route only) */}
+      {isSelected && (
+        <div className="mt-3 flex items-center justify-between">
+          <ExportMenu route={route} />
+          {loop && loop.overlapPenalty > 0.3 && (
+            <span className="text-[10px] text-[#ff2d55] opacity-70">
+              ⚠️ {Math.round(loop.overlapPenalty * 100)}% overlap
+            </span>
+          )}
         </div>
       )}
 
