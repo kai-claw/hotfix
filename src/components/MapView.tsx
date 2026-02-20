@@ -348,24 +348,49 @@ export default function MapView() {
       }
 
       // Floor-it event markers (loop mode, selected route)
+      // NOTE: Popups are managed manually (NOT via marker.setPopup()) because
+      // MapLibre's built-in setPopup() hides the marker icon when the popup
+      // opens, and the MutationObserver workaround is unreliable on mobile.
       if (mode === 'loop' && selectedRouteId) {
         const selectedLoop = loopRoutes.find((r) => r.id === selectedRouteId)
         if (selectedLoop?.floorability?.events?.length) {
-          // Only show top events to avoid clutter (max 12)
           const topEvents = selectedLoop.floorability.events.slice(0, 12)
           topEvents.forEach((event, idx) => {
             const el = createEventMarkerElement(event, idx)
+
+            const marker = new maplibregl.Marker({ element: el })
+              .setLngLat([event.lng, event.lat])
+              .addTo(map)
+
+            // Manual popup — completely independent of marker lifecycle
             const popup = new maplibregl.Popup({
               offset: 20,
-              closeButton: false,
+              closeButton: true,
               className: 'hotfix-event-popup',
               maxWidth: '240px',
             }).setHTML(createEventPopupHTML(event))
 
-            const marker = new maplibregl.Marker({ element: el })
-              .setLngLat([event.lng, event.lat])
-              .setPopup(popup)
-              .addTo(map)
+            let popupOpen = false
+            const togglePopup = (e: Event) => {
+              e.stopPropagation()
+              if (popupOpen) {
+                popup.remove()
+                popupOpen = false
+              } else {
+                // Close any other open event popups first
+                eventPopupsRef.current.forEach((p) => p.remove())
+                popup.setLngLat([event.lng, event.lat]).addTo(map)
+                popupOpen = true
+              }
+            }
+            el.addEventListener('click', togglePopup)
+            el.addEventListener('touchend', (e) => {
+              e.preventDefault() // prevent ghost click
+              togglePopup(e)
+            })
+
+            // Track close via popup's own close event
+            popup.on('close', () => { popupOpen = false })
 
             eventMarkersRef.current.push(marker)
             eventPopupsRef.current.push(popup)
@@ -537,24 +562,6 @@ function createEventMarkerElement(event: FloorItEvent, _index: number): HTMLDivE
     pointer-events: auto;
   `
   el.textContent = emoji
-
-  // Prevent marker from disappearing — keep it visible regardless of popup state
-  const observer = new MutationObserver(() => {
-    const parent = el.closest('.maplibregl-marker') as HTMLElement | null
-    if (parent && parent.style.display === 'none') {
-      parent.style.display = ''
-    }
-    if (parent && parent.style.visibility === 'hidden') {
-      parent.style.visibility = 'visible'
-    }
-  })
-  // Observe once the element is in the DOM
-  requestAnimationFrame(() => {
-    const parent = el.closest('.maplibregl-marker')
-    if (parent) {
-      observer.observe(parent, { attributes: true, attributeFilter: ['style'] })
-    }
-  })
 
   el.onmouseenter = () => {
     el.style.transform = 'scale(1.3)'

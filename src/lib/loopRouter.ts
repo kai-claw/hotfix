@@ -280,43 +280,44 @@ function calculateOverlapPenalty(coords: [number, number][]): number {
 }
 
 /**
- * Detect local turnarounds — segments where the route reverses direction
- * sharply and doubles back on itself. Returns a penalty 0-1.
+ * Detect local turnarounds (panhandles) — segments where the route goes out
+ * to a dead end and doubles back on itself. Returns a penalty 0-1.
+ * 
+ * Stricter than before: even a single panhandle segment is penalized heavily
+ * because it ruins the driving experience (you KNOW you're backtracking).
  */
 function detectLocalTurnarounds(coords: [number, number][]): number {
   if (coords.length < 30) return 0
 
-  const CLOSE_THRESHOLD_DEG = 0.0005 // ~55m
-  // Check windows of ~5% of the route length
-  const windowSize = Math.max(10, Math.floor(coords.length * 0.05))
-  const step = Math.max(1, Math.floor(windowSize / 3))
+  const CLOSE_THRESHOLD_DEG = 0.0006 // ~65m — slightly wider to catch near-misses
+  // Check windows of ~4% of the route length (was 5% — tighter scanning)
+  const windowSize = Math.max(8, Math.floor(coords.length * 0.04))
+  const step = Math.max(1, Math.floor(windowSize / 4))
 
   let turnaroundSegments = 0
   let totalChecks = 0
 
-  // For each point, check if there's a point AHEAD in the route (by 2-4 windows)
+  // For each point, check if there's a point AHEAD in the route (by 1.5-5 windows)
   // that's geographically close — meaning the route came back to this spot
-  for (let i = 0; i < coords.length - windowSize * 3; i += step) {
+  for (let i = 0; i < coords.length - windowSize * 2; i += step) {
     totalChecks++
 
-    // Look ahead 2-4 windows for a nearby point
-    const searchStart = i + windowSize * 2
-    const searchEnd = Math.min(coords.length, i + windowSize * 5)
+    // Search range: 1.5 to 6 windows ahead (was 2-5 — catch shorter panhandles)
+    const searchStart = i + Math.floor(windowSize * 1.5)
+    const searchEnd = Math.min(coords.length, i + windowSize * 6)
 
     for (let j = searchStart; j < searchEnd; j += step) {
       const dLat = Math.abs(coords[i][1] - coords[j][1])
       const dLng = Math.abs(coords[i][0] - coords[j][0])
 
       if (dLat < CLOSE_THRESHOLD_DEG && dLng < CLOSE_THRESHOLD_DEG) {
-        // This point is near a point 2-4 windows ahead — possible turnaround
-        // Verify by checking that the route actually went AWAY and came back
+        // Verify: the midpoint must be farther away (route went OUT and came BACK)
         const midIdx = Math.floor((i + j) / 2)
         const midDist = Math.sqrt(
           (coords[midIdx][0] - coords[i][0]) ** 2 +
           (coords[midIdx][1] - coords[i][1]) ** 2
         )
-        // If the midpoint is significantly farther away than the endpoints, it's a turnaround
-        if (midDist > CLOSE_THRESHOLD_DEG * 3) {
+        if (midDist > CLOSE_THRESHOLD_DEG * 2.5) {
           turnaroundSegments++
         }
         break
@@ -324,10 +325,10 @@ function detectLocalTurnarounds(coords: [number, number][]): number {
     }
   }
 
-  // If more than 15% of checks show turnaround behavior, it's a problem
   const turnaroundRatio = totalChecks > 0 ? turnaroundSegments / totalChecks : 0
-  // Scale so that even 10% turnaround = significant penalty
-  return Math.min(1, turnaroundRatio * 3)
+  // Much harsher scaling: even 5% turnaround = heavy penalty (was 10% = significant)
+  // A single panhandle is highly visible and ruins the experience
+  return Math.min(1, turnaroundRatio * 5)
 }
 
 // ─── Route Naming ─────────────────────────────────────
@@ -547,8 +548,9 @@ export async function generateLoopRoutes(
     return { ...c, circ, overlap, quality }
   })
 
-  // Hard reject only the truly broken ones
-  let quality = scored.filter((c) => c.overlap <= 0.5 && c.circ >= 0.05)
+  // Hard reject routes with significant backtracking or no circularity
+  // Tightened from 0.5 → 0.35 overlap threshold — panhandles are unacceptable
+  let quality = scored.filter((c) => c.overlap <= 0.35 && c.circ >= 0.05)
 
   // If nothing passes even the loose filter, take everything
   if (quality.length === 0) {
@@ -726,10 +728,11 @@ async function scoreCandidates(
     const overlapPenalty = calculateOverlapPenalty(route.geometry.coordinates)
     const circularity = calculateCircularity(route.geometry.coordinates)
 
-    // Mild penalty for any remaining overlap
-    if (overlapPenalty > 0.1) {
-      const penaltyMultiplier = 1 - (overlapPenalty * 0.3)
-      floorability.totalScore = Math.round(floorability.totalScore * penaltyMultiplier)
+    // Penalize routes with backtracking — panhandles ruin the experience
+    // Heavier penalty: 0.1 overlap = mild, 0.3+ = serious score hit
+    if (overlapPenalty > 0.05) {
+      const penaltyMultiplier = 1 - (overlapPenalty * 0.5)
+      floorability.totalScore = Math.round(floorability.totalScore * Math.max(0.3, penaltyMultiplier))
     }
 
     // Slight bonus for highly circular routes
