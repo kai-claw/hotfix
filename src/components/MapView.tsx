@@ -4,6 +4,8 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { useRouteStore } from '../store/routeStore'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import type { FloorItEvent } from '../lib/floorability'
+import { computeFloorabilityGradient } from '../lib/floorability'
+import type { ExpressionSpecification } from 'maplibre-gl'
 
 // CartoDB Dark Matter — gorgeous dark tiles, free, no API key
 const DARK_STYLE = {
@@ -69,12 +71,17 @@ export default function MapView() {
     const map = mapRef.current
     if (!map) return
 
-    for (let i = 0; i < 10; i++) {
-      const layerId = `route-${i}`
-      const outlineId = `route-outline-${i}`
-      if (map.getLayer(outlineId)) map.removeLayer(outlineId)
-      if (map.getLayer(layerId)) map.removeLayer(layerId)
-      if (map.getSource(layerId)) map.removeSource(layerId)
+    // Clean up both A→B (route-N) and loop (loop-N) layers
+    for (const prefix of ['route-', 'loop-']) {
+      for (let i = 0; i < 10; i++) {
+        const layerId = `${prefix}${i}`
+        const outlineId = `${layerId}-outline`
+        const glowId = `${layerId}-glow`
+        if (map.getLayer(glowId)) map.removeLayer(glowId)
+        if (map.getLayer(outlineId)) map.removeLayer(outlineId)
+        if (map.getLayer(layerId)) map.removeLayer(layerId)
+        if (map.getSource(layerId)) map.removeSource(layerId)
+      }
     }
 
     markersRef.current.forEach((m) => m.remove())
@@ -107,9 +114,16 @@ export default function MapView() {
         const isSelected = route.id === selectedRouteId
         const sourceId = route.id
 
+        // Check if this is a selected loop route with floor-it events
+        const selectedLoop = isSelected && mode === 'loop'
+          ? loopRoutes.find((r) => r.id === route.id)
+          : null
+        const hasEvents = selectedLoop && selectedLoop.floorability?.events?.length > 0
+
         if (!map.getSource(sourceId)) {
           map.addSource(sourceId, {
             type: 'geojson',
+            lineMetrics: true, // enables line-progress for gradient
             data: {
               type: 'Feature',
               properties: {},
@@ -118,43 +132,89 @@ export default function MapView() {
           })
         }
 
-        // Glow outline
-        const outlineId = `${sourceId}-outline`
-        if (!map.getLayer(outlineId)) {
-          map.addLayer({
-            id: outlineId,
-            type: 'line',
-            source: sourceId,
-            layout: {
-              'line-join': 'round',
-              'line-cap': 'round',
-            },
-            paint: {
-              'line-color': route.color,
-              'line-width': isSelected ? 12 : 6,
-              'line-opacity': isSelected ? 0.2 : 0.05,
-              'line-blur': 8,
-            },
-          })
-        }
+        if (isSelected && hasEvents && selectedLoop) {
+          // ── Selected loop route with events: floorability gradient ──
+          const gradientStops = computeFloorabilityGradient(
+            route.mapboxRoute.geometry.coordinates,
+            selectedLoop.floorability.events
+          )
 
-        // Main route line
-        if (!map.getLayer(sourceId)) {
-          map.addLayer({
-            id: sourceId,
-            type: 'line',
-            source: sourceId,
-            layout: {
-              'line-join': 'round',
-              'line-cap': 'round',
-              'line-sort-key': isSelected ? 100 : 0,
-            },
-            paint: {
-              'line-color': route.color,
-              'line-width': isSelected ? 5 : 3,
-              'line-opacity': isSelected ? 1 : 0.35,
-            },
-          })
+          // Build MapLibre interpolate expression
+          const gradientExpr: unknown[] = ['interpolate', ['linear'], ['line-progress']]
+          for (const stop of gradientStops) {
+            gradientExpr.push(stop.progress, stop.color)
+          }
+
+          // Warm glow outline
+          const glowId = `${sourceId}-glow`
+          if (!map.getLayer(glowId)) {
+            map.addLayer({
+              id: glowId,
+              type: 'line',
+              source: sourceId,
+              layout: { 'line-join': 'round', 'line-cap': 'round' },
+              paint: {
+                'line-gradient': gradientExpr as ExpressionSpecification,
+                'line-width': 16,
+                'line-opacity': 0.15,
+                'line-blur': 10,
+              },
+            })
+          }
+
+          // Main gradient line
+          if (!map.getLayer(sourceId)) {
+            map.addLayer({
+              id: sourceId,
+              type: 'line',
+              source: sourceId,
+              layout: {
+                'line-join': 'round',
+                'line-cap': 'round',
+                'line-sort-key': 100,
+              },
+              paint: {
+                'line-gradient': gradientExpr as ExpressionSpecification,
+                'line-width': 5,
+                'line-opacity': 1,
+              },
+            })
+          }
+        } else {
+          // ── Normal solid-color route ──
+          const outlineId = `${sourceId}-outline`
+          if (!map.getLayer(outlineId)) {
+            map.addLayer({
+              id: outlineId,
+              type: 'line',
+              source: sourceId,
+              layout: { 'line-join': 'round', 'line-cap': 'round' },
+              paint: {
+                'line-color': route.color,
+                'line-width': isSelected ? 12 : 6,
+                'line-opacity': isSelected ? 0.2 : 0.05,
+                'line-blur': 8,
+              },
+            })
+          }
+
+          if (!map.getLayer(sourceId)) {
+            map.addLayer({
+              id: sourceId,
+              type: 'line',
+              source: sourceId,
+              layout: {
+                'line-join': 'round',
+                'line-cap': 'round',
+                'line-sort-key': isSelected ? 100 : 0,
+              },
+              paint: {
+                'line-color': route.color,
+                'line-width': isSelected ? 5 : 3,
+                'line-opacity': isSelected ? 1 : 0.35,
+              },
+            })
+          }
         }
       })
 

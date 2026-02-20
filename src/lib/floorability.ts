@@ -174,6 +174,101 @@ function findNearestPoint(
   return { idx: minIdx, dist: minDist }
 }
 
+// ─── Segment Gradient ─────────────────────────────────
+
+export interface GradientStop {
+  progress: number // 0-1 along route
+  color: string    // hex color
+}
+
+/**
+ * Compute per-segment floorability colors for MapLibre line-gradient.
+ * Returns gradient stops mapping route progress to heat colors:
+ *   blue (chill) → cyan → yellow → red (floor it)
+ */
+export function computeFloorabilityGradient(
+  routeCoords: [number, number][], // [lng, lat][]
+  events: FloorItEvent[]
+): GradientStop[] {
+  if (events.length === 0 || routeCoords.length < 2) {
+    return [{ progress: 0, color: '#2a3a5a' }, { progress: 1, color: '#2a3a5a' }]
+  }
+
+  // Compute cumulative distance along route
+  const cumDist: number[] = [0]
+  for (let i = 1; i < routeCoords.length; i++) {
+    const d = haversineDistMi(
+      routeCoords[i - 1][1], routeCoords[i - 1][0],
+      routeCoords[i][1], routeCoords[i][0]
+    )
+    cumDist.push(cumDist[i - 1] + d)
+  }
+  const totalMi = cumDist[cumDist.length - 1]
+  if (totalMi === 0) {
+    return [{ progress: 0, color: '#2a3a5a' }, { progress: 1, color: '#2a3a5a' }]
+  }
+
+  // Map each event to a heat zone on the route (progress range + score)
+  const heatZones: { start: number; end: number; score: number }[] = []
+  for (const event of events) {
+    const nearest = findNearestPoint(event.lat, event.lng, routeCoords)
+    const progress = cumDist[nearest.idx] / totalMi
+    const runwayProgress = Math.min(event.runwayMi / totalMi, 0.25) // cap at 25% of route
+    heatZones.push({
+      start: Math.max(0, progress - 0.008), // tiny lead-in before the event
+      end: Math.min(1, progress + runwayProgress),
+      score: event.score,
+    })
+  }
+
+  // Normalize scores to 0-1
+  const maxScore = Math.max(...heatZones.map((z) => z.score), 1)
+
+  // Sample the route at N points and compute heat at each
+  const N = 64
+  const stops: GradientStop[] = []
+
+  for (let i = 0; i <= N; i++) {
+    const p = i / N
+    let maxInfluence = 0
+
+    for (const zone of heatZones) {
+      if (p >= zone.start && p <= zone.end) {
+        const zoneLen = zone.end - zone.start
+        const zoneProg = zoneLen > 0 ? (p - zone.start) / zoneLen : 0
+        // Score decays linearly to 30% at the end of the runway
+        const influence = (zone.score / maxScore) * (1 - zoneProg * 0.7)
+        maxInfluence = Math.max(maxInfluence, influence)
+      }
+    }
+
+    stops.push({ progress: p, color: heatToColor(maxInfluence) })
+  }
+
+  return stops
+}
+
+/** Map a 0-1 heat value to a color: dim blue → cyan → amber → hot red */
+function heatToColor(heat: number): string {
+  if (heat < 0.05) return '#2a3a5a'  // dim base — no event nearby
+  if (heat < 0.25) return lerpHex('#2a3a5a', '#00d4ff', (heat - 0.05) / 0.20)
+  if (heat < 0.55) return lerpHex('#00d4ff', '#ffb800', (heat - 0.25) / 0.30)
+  return lerpHex('#ffb800', '#ff2d55', Math.min((heat - 0.55) / 0.45, 1))
+}
+
+function lerpHex(a: string, b: string, t: number): string {
+  const ar = parseInt(a.slice(1, 3), 16)
+  const ag = parseInt(a.slice(3, 5), 16)
+  const ab = parseInt(a.slice(5, 7), 16)
+  const br = parseInt(b.slice(1, 3), 16)
+  const bg = parseInt(b.slice(3, 5), 16)
+  const bb = parseInt(b.slice(5, 7), 16)
+  const r = Math.round(ar + (br - ar) * t)
+  const g = Math.round(ag + (bg - ag) * t)
+  const bl = Math.round(ab + (bb - ab) * t)
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${bl.toString(16).padStart(2, '0')}`
+}
+
 // ─── Core Scoring Engine ──────────────────────────────
 
 export function analyzeFloorability(
