@@ -129,6 +129,18 @@ function parseLeg(leg: OSRMLegRaw) {
   }
 }
 
+/** Fetch with a timeout — prevents hanging on slow/dead OSRM responses */
+async function fetchWithTimeout(url: string, timeoutMs: number = 8000): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, { signal: controller.signal })
+    return response
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
  * Fetch a single loop route from OSRM using the route endpoint
  */
@@ -138,7 +150,7 @@ async function fetchLoopRoute(
 ): Promise<MapboxRoute | null> {
   try {
     const url = buildLoopUrl(start, waypoints)
-    const response = await fetch(url)
+    const response = await fetchWithTimeout(url)
     if (!response.ok) return null
 
     const data = await response.json()
@@ -168,15 +180,13 @@ async function fetchTripRoute(
 ): Promise<MapboxRoute | null> {
   try {
     const url = buildTripUrl(start, waypoints)
-    const response = await fetch(url)
+    const response = await fetchWithTimeout(url)
     if (!response.ok) {
-      // Fall back to regular route endpoint
       return fetchLoopRoute(start, waypoints)
     }
 
     const data = await response.json()
 
-    // Trip endpoint returns `trips` instead of `routes`
     if (data.code !== 'Ok' || !data.trips?.length) {
       return fetchLoopRoute(start, waypoints)
     }
@@ -191,7 +201,6 @@ async function fetchTripRoute(
       weight_name: 'duration',
     }
   } catch {
-    // Fall back to regular route endpoint
     return fetchLoopRoute(start, waypoints)
   }
 }
@@ -565,7 +574,38 @@ export async function generateLoopRoutes(
 }
 
 /**
+ * Explore a single nearby area — returns candidates or empty array on failure.
+ * Isolated so one area failing doesn't kill the whole run.
+ */
+async function exploreNearbyArea(
+  loopStart: [number, number],
+  loopRadius: number,
+  triRadius: number
+): Promise<{ route: MapboxRoute; waypoints: [number, number][]; method: string }[]> {
+  const results: { route: MapboxRoute; waypoints: [number, number][]; method: string }[] = []
+  try {
+    // 4-waypoint trip loop
+    const wps4 = generateWaypoints(loopStart, loopRadius, [0, 90, 180, 270])
+    const tripResult = await fetchTripRoute(loopStart, wps4)
+    if (tripResult) {
+      results.push({ route: tripResult, waypoints: wps4, method: 'nearby-trip' })
+    }
+
+    // 3-waypoint route loop for variety
+    const wps3 = generateWaypoints(loopStart, triRadius * 0.35, [0, 120, 240])
+    const routeResult = await fetchLoopRoute(loopStart, wps3)
+    if (routeResult) {
+      results.push({ route: routeResult, waypoints: wps3, method: 'nearby-route' })
+    }
+  } catch {
+    // This area failed — that's fine, we have others
+  }
+  return results
+}
+
+/**
  * Generate loops from nearby starting points (Nearby mode)
+ * Processes 3 areas at a time to avoid OSRM rate limits and timeouts.
  */
 async function generateNearbyLoopRoutes(
   center: [number, number],
@@ -574,32 +614,40 @@ async function generateNearbyLoopRoutes(
 ): Promise<LoopRoute[]> {
   const loopRadius = LOOP_RADIUS[duration]
   const triRadius = DURATION_RADIUS[duration]
-  const nearbyStarts = generateNearbyStartPoints(center, loopRadius * 2) // scatter starts around the area
+  const nearbyStarts = generateNearbyStartPoints(center, loopRadius * 2)
 
   onProgress?.('Finding nearby loops...', 0.1)
 
   const allCandidates: { route: MapboxRoute; waypoints: [number, number][]; method: string }[] = []
 
-  // For each nearby start point, generate a 4-waypoint trip loop (Fix 2)
-  for (let s = 0; s < nearbyStarts.length; s++) {
-    const loopStart = nearbyStarts[s]
+  // Process in batches of 3 areas at a time
+  const BATCH_SIZE = 3
+  for (let batchStart = 0; batchStart < nearbyStarts.length; batchStart += BATCH_SIZE) {
+    const batch = nearbyStarts.slice(batchStart, batchStart + BATCH_SIZE)
+    const batchNum = Math.floor(batchStart / BATCH_SIZE) + 1
+    const totalBatches = Math.ceil(nearbyStarts.length / BATCH_SIZE)
 
-    onProgress?.(`Exploring area ${s + 1}/${nearbyStarts.length}...`, 0.1 + (s / nearbyStarts.length) * 0.3)
+    onProgress?.(
+      `Exploring areas ${batchStart + 1}-${batchStart + batch.length} of ${nearbyStarts.length}...`,
+      0.1 + (batchNum / totalBatches) * 0.3
+    )
 
-    // 4-waypoint trip loop using proper circular radius
-    const wps4 = generateWaypoints(loopStart, loopRadius, [0, 90, 180, 270])
-    const tripResult4 = await fetchTripRoute(loopStart, wps4)
-    if (tripResult4) {
-      allCandidates.push({ route: tripResult4, waypoints: wps4, method: 'nearby-trip' })
+    // Run all areas in this batch in parallel
+    const batchResults = await Promise.all(
+      batch.map((loopStart) => exploreNearbyArea(loopStart, loopRadius, triRadius))
+    )
+
+    for (const areaResults of batchResults) {
+      allCandidates.push(...areaResults)
     }
 
-    // Also try a 3-waypoint route loop for variety
-    const wps3 = generateWaypoints(loopStart, triRadius * 0.35, [0, 120, 240])
-    const routeResult3 = await fetchLoopRoute(loopStart, wps3)
-    if (routeResult3) {
-      allCandidates.push({ route: routeResult3, waypoints: wps3, method: 'nearby-route' })
+    // Brief pause between batches to respect OSRM rate limits
+    if (batchStart + BATCH_SIZE < nearbyStarts.length) {
+      await new Promise((r) => setTimeout(r, 500))
     }
   }
+
+  onProgress?.('Evaluating shapes...', 0.45)
 
   const targetDurationSec = duration * 60
   const minDuration = targetDurationSec * 0.5
@@ -608,11 +656,10 @@ async function generateNearbyLoopRoutes(
   // Apply all filters: duration, circularity, overlap
   let filtered = allCandidates
     .filter((c) => c.route.duration >= minDuration && c.route.duration <= maxDuration)
-    .filter((c) => calculateCircularity(c.route.geometry.coordinates) >= 0.1) // slightly relaxed for nearby
+    .filter((c) => calculateCircularity(c.route.geometry.coordinates) >= 0.1)
     .filter((c) => calculateOverlapPenalty(c.route.geometry.coordinates) <= 0.3)
 
   if (filtered.length === 0) {
-    // Fallback: just duration filter
     filtered = allCandidates
       .filter((c) => c.route.duration >= minDuration && c.route.duration <= maxDuration)
       .sort((a, b) => {
@@ -706,9 +753,9 @@ async function scoreCandidates(
       circularity,
     })
 
-    // Small delay between Overpass queries to be respectful
+    // Brief delay between Overpass queries
     if (i < candidates.length - 1) {
-      await new Promise((r) => setTimeout(r, 1500))
+      await new Promise((r) => setTimeout(r, 800))
     }
   }
 

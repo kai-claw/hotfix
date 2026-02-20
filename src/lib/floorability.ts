@@ -332,18 +332,34 @@ export async function queryOverpass(
 out body geom;
 `
 
-  const response = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    body: `data=${encodeURIComponent(query)}`,
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  })
+  // Timeout Overpass calls — they can hang for 30+ seconds on complex queries
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 15000) // 15 second timeout
 
-  if (!response.ok) {
-    console.warn('Overpass API error:', response.status)
+  try {
+    const response = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      body: `data=${encodeURIComponent(query)}`,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      console.warn('Overpass API error:', response.status)
+      return { elements: [] }
+    }
+
+    return response.json()
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      console.warn('Overpass API timed out after 15s')
+    } else {
+      console.warn('Overpass API error:', err)
+    }
     return { elements: [] }
+  } finally {
+    clearTimeout(timer)
   }
-
-  return response.json()
 }
 
 // ─── Speed Limit Parsing ──────────────────────────────
