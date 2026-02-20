@@ -276,11 +276,10 @@ function calculateOverlapPenalty(coords: [number, number][]): number {
 
   // ~50m in degrees at mid-latitudes
   const CLOSE_THRESHOLD_DEG = 0.00045
-  // Minimum index separation: 20% of route
-  const MIN_INDEX_SEPARATION = Math.floor(coords.length * 0.2)
+  // Minimum index separation: 10% of route (was 20% — tighter to catch tip turnarounds)
+  const MIN_INDEX_SEPARATION = Math.floor(coords.length * 0.10)
 
   let overlapCount = 0
-  // Sample up to 100 points for performance
   const sampleStep = Math.max(1, Math.floor(coords.length / 100))
   let totalSampled = 0
 
@@ -289,7 +288,6 @@ function calculateOverlapPenalty(coords: [number, number][]): number {
     let hasOverlap = false
 
     for (let j = 0; j < coords.length; j += sampleStep) {
-      // Only check points that are far away in the route sequence
       if (Math.abs(i - j) < MIN_INDEX_SEPARATION) continue
 
       const dLat = Math.abs(coords[i][1] - coords[j][1])
@@ -304,7 +302,66 @@ function calculateOverlapPenalty(coords: [number, number][]): number {
     if (hasOverlap) overlapCount++
   }
 
-  return totalSampled > 0 ? overlapCount / totalSampled : 0
+  const globalOverlap = totalSampled > 0 ? overlapCount / totalSampled : 0
+
+  // Also detect LOCAL turnarounds — spots where the route reverses direction
+  // even if the overall overlap is low. A turnaround at the tip of a loop
+  // only affects a small portion but ruins the driving experience.
+  const turnaroundPenalty = detectLocalTurnarounds(coords)
+
+  // Return the worse of the two penalties
+  return Math.max(globalOverlap, turnaroundPenalty)
+}
+
+/**
+ * Detect local turnarounds — segments where the route reverses direction
+ * sharply and doubles back on itself. Returns a penalty 0-1.
+ */
+function detectLocalTurnarounds(coords: [number, number][]): number {
+  if (coords.length < 30) return 0
+
+  const CLOSE_THRESHOLD_DEG = 0.0005 // ~55m
+  // Check windows of ~5% of the route length
+  const windowSize = Math.max(10, Math.floor(coords.length * 0.05))
+  const step = Math.max(1, Math.floor(windowSize / 3))
+
+  let turnaroundSegments = 0
+  let totalChecks = 0
+
+  // For each point, check if there's a point AHEAD in the route (by 2-4 windows)
+  // that's geographically close — meaning the route came back to this spot
+  for (let i = 0; i < coords.length - windowSize * 3; i += step) {
+    totalChecks++
+
+    // Look ahead 2-4 windows for a nearby point
+    const searchStart = i + windowSize * 2
+    const searchEnd = Math.min(coords.length, i + windowSize * 5)
+
+    for (let j = searchStart; j < searchEnd; j += step) {
+      const dLat = Math.abs(coords[i][1] - coords[j][1])
+      const dLng = Math.abs(coords[i][0] - coords[j][0])
+
+      if (dLat < CLOSE_THRESHOLD_DEG && dLng < CLOSE_THRESHOLD_DEG) {
+        // This point is near a point 2-4 windows ahead — possible turnaround
+        // Verify by checking that the route actually went AWAY and came back
+        const midIdx = Math.floor((i + j) / 2)
+        const midDist = Math.sqrt(
+          (coords[midIdx][0] - coords[i][0]) ** 2 +
+          (coords[midIdx][1] - coords[i][1]) ** 2
+        )
+        // If the midpoint is significantly farther away than the endpoints, it's a turnaround
+        if (midDist > CLOSE_THRESHOLD_DEG * 3) {
+          turnaroundSegments++
+        }
+        break
+      }
+    }
+  }
+
+  // If more than 15% of checks show turnaround behavior, it's a problem
+  const turnaroundRatio = totalChecks > 0 ? turnaroundSegments / totalChecks : 0
+  // Scale so that even 10% turnaround = significant penalty
+  return Math.min(1, turnaroundRatio * 3)
 }
 
 // ─── Route Naming ─────────────────────────────────────

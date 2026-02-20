@@ -42,7 +42,7 @@ export default function MapView() {
   const eventMarkersRef = useRef<maplibregl.Marker[]>([])
   const eventPopupsRef = useRef<maplibregl.Popup[]>([])
 
-  const { routes, selectedRouteId, origin, destination, mode, loopRoutes } = useRouteStore()
+  const { routes, selectedRouteId, origin, destination, mode, loopRoutes, setOrigin } = useRouteStore()
 
   // Initialize map
   useEffect(() => {
@@ -65,6 +65,52 @@ export default function MapView() {
       mapRef.current = null
     }
   }, [])
+
+  // Update cursor based on mode
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const canvas = map.getCanvasContainer()
+    if (mode === 'loop') {
+      canvas.style.cursor = 'crosshair'
+    } else {
+      canvas.style.cursor = ''
+    }
+  }, [mode])
+
+  // Drop-a-pin: click/tap map to set origin in loop mode
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+
+    const handleClick = (e: maplibregl.MapMouseEvent) => {
+      // Only in loop mode
+      const currentMode = useRouteStore.getState().mode
+      if (currentMode !== 'loop') return
+
+      const { lng, lat } = e.lngLat
+
+      // Reverse geocode to get a readable name
+      fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=16`, {
+        headers: { 'User-Agent': 'Hotfix-App/1.0' },
+      })
+        .then((r) => r.json())
+        .then((data: { display_name?: string }) => {
+          const name = data.display_name
+            ? data.display_name.split(',').slice(0, 3).join(',')
+            : `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+          setOrigin({ lng, lat }, `📍 ${name}`)
+        })
+        .catch(() => {
+          setOrigin({ lng, lat }, `📍 ${lat.toFixed(4)}, ${lng.toFixed(4)}`)
+        })
+    }
+
+    map.on('click', handleClick)
+    return () => {
+      map.off('click', handleClick)
+    }
+  }, [setOrigin])
 
   // Clear existing route layers
   const clearRoutes = useCallback(() => {
