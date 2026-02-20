@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useRouteStore } from '../store/routeStore'
@@ -41,6 +41,8 @@ export default function MapView() {
   const markersRef = useRef<maplibregl.Marker[]>([])
   const eventMarkersRef = useRef<maplibregl.Marker[]>([])
   const eventPopupsRef = useRef<maplibregl.Popup[]>([])
+  const dropPinMarkerRef = useRef<maplibregl.Marker | null>(null)
+  const [locating, setLocating] = useState(false)
 
   const { routes, selectedRouteId, origin, destination, mode, loopRoutes, setOrigin } = useRouteStore()
 
@@ -90,6 +92,15 @@ export default function MapView() {
 
       const { lng, lat } = e.lngLat
 
+      // Immediately show a pulsing pin marker for visual feedback
+      if (dropPinMarkerRef.current) {
+        dropPinMarkerRef.current.remove()
+      }
+      const pinEl = createDropPinElement()
+      dropPinMarkerRef.current = new maplibregl.Marker({ element: pinEl })
+        .setLngLat([lng, lat])
+        .addTo(map)
+
       // Reverse geocode to get a readable name
       fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=16`, {
         headers: { 'User-Agent': 'Hotfix-App/1.0' },
@@ -110,6 +121,57 @@ export default function MapView() {
     return () => {
       map.off('click', handleClick)
     }
+  }, [setOrigin])
+
+  // Clean up drop pin when routes load (origin marker takes over)
+  useEffect(() => {
+    if (routes.length > 0 && dropPinMarkerRef.current) {
+      dropPinMarkerRef.current.remove()
+      dropPinMarkerRef.current = null
+    }
+  }, [routes])
+
+  // Current location handler
+  const handleLocateMe = useCallback(() => {
+    if (!navigator.geolocation) return
+    setLocating(true)
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { longitude: lng, latitude: lat } = pos.coords
+        setLocating(false)
+
+        // Drop pin immediately
+        const map = mapRef.current
+        if (map) {
+          if (dropPinMarkerRef.current) dropPinMarkerRef.current.remove()
+          const pinEl = createDropPinElement()
+          dropPinMarkerRef.current = new maplibregl.Marker({ element: pinEl })
+            .setLngLat([lng, lat])
+            .addTo(map)
+          map.flyTo({ center: [lng, lat], zoom: 13, duration: 1000 })
+        }
+
+        // Reverse geocode
+        fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=16`, {
+          headers: { 'User-Agent': 'Hotfix-App/1.0' },
+        })
+          .then((r) => r.json())
+          .then((data: { display_name?: string }) => {
+            const name = data.display_name
+              ? data.display_name.split(',').slice(0, 3).join(',')
+              : `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+            setOrigin({ lng, lat }, `📍 ${name}`)
+          })
+          .catch(() => {
+            setOrigin({ lng, lat }, `📍 ${lat.toFixed(4)}, ${lng.toFixed(4)}`)
+          })
+      },
+      () => {
+        setLocating(false)
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    )
   }, [setOrigin])
 
   // Clear existing route layers
@@ -340,8 +402,77 @@ export default function MapView() {
   }, [routes, selectedRouteId, origin, destination, clearRoutes, isMobile, mode, loopRoutes])
 
   return (
-    <div ref={mapContainerRef} className="w-full h-full" />
+    <div className="relative w-full h-full">
+      <div ref={mapContainerRef} className="w-full h-full" />
+
+      {/* Current Location button — loop mode only */}
+      {mode === 'loop' && (
+        <button
+          onClick={handleLocateMe}
+          disabled={locating}
+          className="absolute z-20 flex items-center justify-center rounded-full bg-[#1a1a2e]/90 backdrop-blur border border-[#2a2a3e] shadow-lg hover:border-[#ff2d55]/40 hover:bg-[#ff2d55]/10 active:scale-95 transition-all"
+          style={{
+            width: 44,
+            height: 44,
+            bottom: isMobile ? 'calc(max(120px, 40vh) + 12px)' : 20,
+            left: 16,
+          }}
+          title="Use current location"
+        >
+          {locating ? (
+            <div className="w-5 h-5 rounded-full border-2 border-[#2a2a3e] border-t-[#ff2d55] animate-spin" />
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a0a0b0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
+            </svg>
+          )}
+        </button>
+      )}
+
+      {/* Tap hint — loop mode, no origin set */}
+      {mode === 'loop' && !origin && routes.length === 0 && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none">
+          <div className="flex flex-col items-center gap-2 bg-[#0f0f1a]/80 backdrop-blur-sm rounded-2xl px-6 py-4 border border-[#2a2a3e]">
+            <span className="text-2xl">📍</span>
+            <span className="text-sm text-[#a0a0b0] font-medium">Tap the map to drop a pin</span>
+            <span className="text-xs text-[#6a6a8a]">or search above, or use 📍 location</span>
+          </div>
+        </div>
+      )}
+    </div>
   )
+}
+
+/** Pulsing red pin — immediate visual feedback when user taps the map */
+function createDropPinElement(): HTMLDivElement {
+  const el = document.createElement('div')
+  el.style.cssText = `
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #ff2d55;
+    border: 3px solid white;
+    box-shadow: 0 0 0 0 rgba(255, 45, 85, 0.5);
+    animation: hotfix-pin-pulse 1.5s ease-out infinite;
+    pointer-events: none;
+  `
+
+  // Inject keyframes if not already present
+  if (!document.getElementById('hotfix-pin-pulse-style')) {
+    const style = document.createElement('style')
+    style.id = 'hotfix-pin-pulse-style'
+    style.textContent = `
+      @keyframes hotfix-pin-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(255, 45, 85, 0.5); }
+        70% { box-shadow: 0 0 0 20px rgba(255, 45, 85, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 45, 85, 0); }
+      }
+    `
+    document.head.appendChild(style)
+  }
+
+  return el
 }
 
 function createMarkerElement(emoji: string, type: 'origin' | 'destination'): HTMLDivElement {
