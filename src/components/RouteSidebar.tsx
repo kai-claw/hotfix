@@ -3,39 +3,59 @@ import { useIsMobile } from '../hooks/useMediaQuery'
 import RouteCard from './RouteCard'
 
 export default function RouteSidebar() {
-  const { routes, selectedRouteId, selectRoute, loadingState, error } =
+  const { mode, routes, loopRoutes, selectedRouteId, selectRoute, loadingState, loadingStage, loadingProgress, error } =
     useRouteStore()
   const isMobile = useIsMobile()
 
-  if (loadingState === 'idle' && routes.length === 0) {
-    if (isMobile) {
-      // Don't show the full empty state on mobile — bottom sheet handles it
-      return null
-    }
+  const displayRoutes = mode === 'loop' ? loopRoutes : routes
+  const isLoop = mode === 'loop'
+
+  if (loadingState === 'idle' && displayRoutes.length === 0) {
+    if (isMobile) return null
 
     return (
       <div className="h-full flex flex-col items-center justify-center px-6 text-center">
-        <div className="text-5xl mb-4">🏎️</div>
+        <div className="text-5xl mb-4">{isLoop ? '🔄' : '🏎️'}</div>
         <h2 className="text-xl font-bold text-white mb-2">
-          Ready to Rip?
+          {isLoop ? 'Ready to Loop?' : 'Ready to Rip?'}
         </h2>
         <p className="text-sm text-[#6a6a8a] leading-relaxed">
-          Enter an origin and destination to find routes that let you actually
-          use what's under the hood.
+          {isLoop
+            ? 'Pick a starting point and we\'ll generate loops with the highest floorability — speed transitions, signal launches, and on-ramp merges.'
+            : 'Enter an origin and destination to find routes that let you actually use what\'s under the hood.'}
         </p>
         <div className="mt-6 flex flex-col gap-2 text-xs text-[#4a4a5a]">
-          <div className="flex items-center gap-2">
-            <span className="text-[#ff2d55]">●</span> Long straightaways
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[#ffb800]">●</span> On-ramp acceleration zones
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[#00d4ff]">●</span> Sweeping curves
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[#a855f7]">●</span> Scenic elevation changes
-          </div>
+          {isLoop ? (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="text-[#ff2d55]">⚡</span> Speed limit transitions (25→55)
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[#ffb800]">🚦</span> Signal launch zones
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[#00d4ff]">🛣️</span> On-ramp acceleration
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[#a855f7]">📏</span> Long acceleration runways
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="text-[#ff2d55]">●</span> Long straightaways
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[#ffb800]">●</span> On-ramp acceleration zones
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[#00d4ff]">●</span> Sweeping curves
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[#a855f7]">●</span> Scenic elevation changes
+              </div>
+            </>
+          )}
         </div>
       </div>
     )
@@ -49,12 +69,21 @@ export default function RouteSidebar() {
             isMobile ? 'w-10 h-10' : 'w-16 h-16'
           }`} />
           <div className="absolute inset-0 flex items-center justify-center">
-            <span className={isMobile ? 'text-lg' : 'text-2xl'}>🏎️</span>
+            <span className={isMobile ? 'text-lg' : 'text-2xl'}>{isLoop ? '🔄' : '🏎️'}</span>
           </div>
         </div>
-        <p className={`text-[#a0a0b0] loading-pulse ${isMobile ? 'text-xs' : 'text-sm'}`}>
-          Finding the fun routes...
+        <p className={`text-[#a0a0b0] mb-2 ${isMobile ? 'text-xs' : 'text-sm'}`}>
+          {loadingStage || 'Finding routes...'}
         </p>
+        {/* Progress bar */}
+        {loadingProgress > 0 && (
+          <div className="w-40 h-1 rounded-full bg-[#1a1a2e] overflow-hidden">
+            <div
+              className="h-full rounded-full bg-[#ff2d55] transition-all duration-300"
+              style={{ width: `${loadingProgress * 100}%` }}
+            />
+          </div>
+        )}
       </div>
     )
   }
@@ -77,25 +106,31 @@ export default function RouteSidebar() {
           <h2 className={`font-bold uppercase tracking-widest text-[#6a6a8a] ${
             isMobile ? 'text-[10px]' : 'text-sm'
           }`}>
-            Routes Found
+            {isLoop ? 'Loop Routes' : 'Routes Found'}
           </h2>
           <span className={`text-[#4a4a5a] ${isMobile ? 'text-[10px]' : 'text-xs'}`}>
-            {routes.length} option{routes.length !== 1 ? 's' : ''}
+            {displayRoutes.length} option{displayRoutes.length !== 1 ? 's' : ''}
           </span>
         </div>
+        {isLoop && (
+          <p className="text-[10px] text-[#4a4a5a] mt-0.5">
+            Ranked by floorability — speed transitions, launches & merges
+          </p>
+        )}
       </div>
 
       {/* Route cards */}
       <div className={`flex-1 overflow-y-auto ${
         isMobile ? 'px-3 pb-3 space-y-2' : 'px-4 pb-4 space-y-3'
       }`}>
-        {routes.map((route, index) => (
+        {displayRoutes.map((route, index) => (
           <RouteCard
             key={route.id}
             route={route}
             isSelected={route.id === selectedRouteId}
             onSelect={() => selectRoute(route.id)}
             index={index}
+            isLoop={isLoop}
           />
         ))}
       </div>
@@ -105,12 +140,8 @@ export default function RouteSidebar() {
         <div className="px-4 py-3 border-t border-[#1a1a2e]">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className="text-[#ff2d55] font-black text-sm tracking-tight">
-                HOTFIX
-              </span>
-              <span className="text-[10px] text-[#4a4a5a] uppercase tracking-widest">
-                Route Like You Mean It
-              </span>
+              <span className="text-[#ff2d55] font-black text-sm tracking-tight">HOTFIX</span>
+              <span className="text-[10px] text-[#4a4a5a] uppercase tracking-widest">Route Like You Mean It</span>
             </div>
           </div>
         </div>
