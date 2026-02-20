@@ -5,9 +5,10 @@ interface BottomSheetProps {
   children: React.ReactNode
 }
 
-type SheetPosition = 'collapsed' | 'peek' | 'expanded'
+type SheetPosition = 'collapsed' | 'loading' | 'peek' | 'expanded'
 
 const COLLAPSED_HEIGHT = 48
+const LOADING_HEIGHT = 120  // Just enough for spinner + progress bar
 const PEEK_HEIGHT_RATIO = 0.4
 const EXPANDED_HEIGHT_RATIO = 0.85
 
@@ -28,6 +29,13 @@ export default function BottomSheet({ children }: BottomSheetProps) {
     }
   }, [routes])
 
+  // Stay small while loading — just enough to show progress, not eat the map
+  useEffect(() => {
+    if (loadingState === 'loading') {
+      setPosition('loading')
+    }
+  }, [loadingState])
+
   // Auto-collapse when idle
   useEffect(() => {
     if (loadingState === 'idle' && routes.length === 0) {
@@ -41,6 +49,8 @@ export default function BottomSheet({ children }: BottomSheetProps) {
       switch (pos) {
         case 'collapsed':
           return COLLAPSED_HEIGHT
+        case 'loading':
+          return LOADING_HEIGHT
         case 'peek':
           return vh * PEEK_HEIGHT_RATIO
         case 'expanded':
@@ -75,7 +85,7 @@ export default function BottomSheet({ children }: BottomSheetProps) {
     const finalHeight = dragStartHeight.current + dragOffset
     const vh = window.innerHeight
 
-    // Snap to nearest position
+    // Snap to nearest position (skip 'loading' — that's automatic only)
     const peekH = vh * PEEK_HEIGHT_RATIO
     const expandedH = vh * EXPANDED_HEIGHT_RATIO
     const collapsedH = COLLAPSED_HEIGHT
@@ -117,7 +127,7 @@ export default function BottomSheet({ children }: BottomSheetProps) {
         onClick={handleClick}
       >
         <div className="w-10 h-1 rounded-full bg-[#3a3a4e] mb-1" />
-        {position === 'collapsed' && (
+        {(position === 'collapsed') && (
           <div className="flex items-center gap-2 py-1">
             <span className="text-[#ff2d55] font-black text-xs tracking-tighter">HOTFIX</span>
             {routes.length > 0 && (
