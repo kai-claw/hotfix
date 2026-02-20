@@ -481,17 +481,21 @@ export async function generateLoopRoutes(
 
   const candidates: { route: MapboxRoute; waypoints: [number, number][]; method: string }[] = []
 
-  // ── FIX 2C: 4-waypoint loops at 90° intervals ──
-  // Use LOOP_RADIUS (smaller, tuned for circular loops)
+  // ── FIX 2C: 4-waypoint loops at various angles and radii for maximum variety ──
+  // More configs = more chances to find a good loop in any road network
   const quadConfigs = [
     { angles: [0, 90, 180, 270], radiusFrac: 1.0, label: 'cardinal-100' },
     { angles: [45, 135, 225, 315], radiusFrac: 1.0, label: 'diagonal-100' },
     { angles: [0, 90, 180, 270], radiusFrac: 0.7, label: 'cardinal-70' },
     { angles: [30, 120, 210, 300], radiusFrac: 0.85, label: 'offset-85' },
-    { angles: [0, 90, 180, 270], radiusFrac: 1.3, label: 'cardinal-130' },
+    { angles: [0, 90, 180, 270], radiusFrac: 1.4, label: 'cardinal-140' },
     { angles: [45, 135, 225, 315], radiusFrac: 0.7, label: 'diagonal-70' },
     { angles: [15, 105, 195, 285], radiusFrac: 1.15, label: 'rotated-115' },
     { angles: [60, 150, 240, 330], radiusFrac: 0.85, label: 'wide-offset-85' },
+    { angles: [0, 90, 180, 270], radiusFrac: 1.6, label: 'cardinal-160' },
+    { angles: [45, 135, 225, 315], radiusFrac: 1.3, label: 'diagonal-130' },
+    { angles: [20, 110, 200, 290], radiusFrac: 0.5, label: 'tight-50' },
+    { angles: [70, 160, 250, 340], radiusFrac: 1.1, label: 'alt-110' },
   ]
 
   // ── FIX 2A: Use trip endpoint for round-trip optimization ──
@@ -542,88 +546,45 @@ export async function generateLoopRoutes(
 
   onProgress?.('Evaluating route shapes...', 0.35)
 
-  // ── Duration filter ──
-  const minDuration = targetDurationSec * 0.5
-  const maxDuration = targetDurationSec * 1.8
+  // ── Duration filter (generous — 40% to 2.2x target) ──
+  const minDuration = targetDurationSec * 0.4
+  const maxDuration = targetDurationSec * 2.2
   let filtered = candidates.filter(
     (c) => c.route.duration >= minDuration && c.route.duration <= maxDuration
   )
 
-  // ── FIX 2B: Circularity filter — hard reject linear routes ──
-  const MIN_CIRCULARITY = 0.15
-  const beforeCircFilter = filtered.length
-  filtered = filtered.filter((c) => {
+  onProgress?.('Evaluating shapes...', 0.38)
+
+  // ── Score each candidate with quality metrics ──
+  // Instead of hard-rejecting, score each route and sort by quality.
+  // Only hard-reject truly degenerate routes (overlap > 0.5 or circularity < 0.05)
+  const scored = filtered.map((c) => {
     const circ = calculateCircularity(c.route.geometry.coordinates)
-    return circ >= MIN_CIRCULARITY
-  })
-
-  if (filtered.length < beforeCircFilter) {
-    onProgress?.(
-      `Rejected ${beforeCircFilter - filtered.length} linear routes...`,
-      0.38
-    )
-  }
-
-  // ── FIX 4: Overlap filter — reject U-turn routes ──
-  const MAX_OVERLAP = 0.25
-  const beforeOverlapFilter = filtered.length
-  filtered = filtered.filter((c) => {
     const overlap = calculateOverlapPenalty(c.route.geometry.coordinates)
-    return overlap <= MAX_OVERLAP
+    const durationFit = 1 - Math.abs(c.route.duration - targetDurationSec) / targetDurationSec
+
+    // Quality score: higher = better loop
+    // Circularity is most important, then low overlap, then duration fit
+    const quality = (circ * 0.45) + ((1 - overlap) * 0.35) + (Math.max(0, durationFit) * 0.2)
+
+    return { ...c, circ, overlap, quality }
   })
 
-  if (filtered.length < beforeOverlapFilter) {
-    onProgress?.(
-      `Rejected ${beforeOverlapFilter - filtered.length} U-turn routes...`,
-      0.42
-    )
+  // Hard reject only the truly broken ones
+  let quality = scored.filter((c) => c.overlap <= 0.5 && c.circ >= 0.05)
+
+  // If nothing passes even the loose filter, take everything
+  if (quality.length === 0) {
+    quality = scored
   }
 
-  onProgress?.('Filtering best candidates...', 0.45)
+  // Sort by quality descending
+  quality.sort((a, b) => b.quality - a.quality)
 
-  // ── Fallback: if all got filtered, gradually relax constraints ──
-  if (filtered.length === 0) {
-    // Try relaxed circularity
-    filtered = candidates
-      .filter((c) => c.route.duration >= minDuration && c.route.duration <= maxDuration)
-      .filter((c) => {
-        const circ = calculateCircularity(c.route.geometry.coordinates)
-        const overlap = calculateOverlapPenalty(c.route.geometry.coordinates)
-        return circ >= 0.08 && overlap <= 0.4
-      })
-  }
+  onProgress?.('Selecting best loops...', 0.45)
 
-  if (filtered.length === 0) {
-    // Last resort: take whatever has the best circularity
-    const withMetrics = candidates
-      .filter((c) => c.route.duration >= minDuration * 0.5 && c.route.duration <= maxDuration * 1.2)
-      .map((c) => ({
-        ...c,
-        circ: calculateCircularity(c.route.geometry.coordinates),
-        overlap: calculateOverlapPenalty(c.route.geometry.coordinates),
-      }))
-      // Sort by circularity descending, then overlap ascending
-      .sort((a, b) => (b.circ - a.circ) || (a.overlap - b.overlap))
-      .slice(0, 4)
-
-    if (withMetrics.length === 0) {
-      throw new Error('Could not generate any loop routes from this location. Try a different spot or longer duration.')
-    }
-    filtered = withMetrics
-  }
-
-  // Sort by: circularity (descending) + closeness to target duration
-  filtered.sort((a, b) => {
-    const circA = calculateCircularity(a.route.geometry.coordinates)
-    const circB = calculateCircularity(b.route.geometry.coordinates)
-    const durationPenaltyA = Math.abs(a.route.duration - targetDurationSec) / targetDurationSec
-    const durationPenaltyB = Math.abs(b.route.duration - targetDurationSec) / targetDurationSec
-
-    // Combined score: higher circularity is better, closer to target duration is better
-    const scoreA = circA - durationPenaltyA * 0.3
-    const scoreB = circB - durationPenaltyB * 0.3
-    return scoreB - scoreA
-  })
+  // Take the best ones, preferring diversity (not all the same shape)
+  filtered = quality.slice(0, 8)
 
   // Take top 6 for floorability scoring
   const topCandidates = filtered.slice(0, 6)
@@ -707,31 +668,28 @@ async function generateNearbyLoopRoutes(
   onProgress?.('Evaluating shapes...', 0.45)
 
   const targetDurationSec = duration * 60
-  const minDuration = targetDurationSec * 0.5
-  const maxDuration = targetDurationSec * 1.8
+  const minDuration = targetDurationSec * 0.4
+  const maxDuration = targetDurationSec * 2.2
 
-  // Apply all filters: duration, circularity, overlap
-  let filtered = allCandidates
-    .filter((c) => c.route.duration >= minDuration && c.route.duration <= maxDuration)
-    .filter((c) => calculateCircularity(c.route.geometry.coordinates) >= 0.1)
-    .filter((c) => calculateOverlapPenalty(c.route.geometry.coordinates) <= 0.3)
+  // Soft-score approach (same as anchor mode): don't hard-reject, rank by quality
+  const durationFiltered = allCandidates.filter(
+    (c) => c.route.duration >= minDuration && c.route.duration <= maxDuration
+  )
 
-  if (filtered.length === 0) {
-    filtered = allCandidates
-      .filter((c) => c.route.duration >= minDuration && c.route.duration <= maxDuration)
-      .sort((a, b) => {
-        const circA = calculateCircularity(a.route.geometry.coordinates)
-        const circB = calculateCircularity(b.route.geometry.coordinates)
-        return circB - circA
-      })
-  }
+  const withQuality = (durationFiltered.length > 0 ? durationFiltered : allCandidates).map((c) => {
+    const circ = calculateCircularity(c.route.geometry.coordinates)
+    const overlap = calculateOverlapPenalty(c.route.geometry.coordinates)
+    const durationFit = 1 - Math.abs(c.route.duration - targetDurationSec) / targetDurationSec
+    const quality = (circ * 0.45) + ((1 - overlap) * 0.35) + (Math.max(0, durationFit) * 0.2)
+    return { ...c, quality }
+  })
 
-  const sorted = filtered
-    .sort((a, b) => Math.abs(a.route.duration - targetDurationSec) - Math.abs(b.route.duration - targetDurationSec))
-    .slice(0, 6)
+  // Sort by quality, take top 6
+  withQuality.sort((a, b) => b.quality - a.quality)
+  const sorted = withQuality.slice(0, 6)
 
   if (sorted.length === 0) {
-    throw new Error('Could not find any good loops in this area. Try a different location or duration.')
+    throw new Error('Could not find any loops in this area. Try a different location or longer duration.')
   }
 
   return scoreCandidates(sorted, center, onProgress)
