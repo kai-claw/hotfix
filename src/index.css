@@ -1,0 +1,129 @@
+@import "tailwindcss";
+
+/* Prevent iOS bounce/overscroll */
+html, body {
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Safe area insets for notched phones */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* Mapbox overrides for dark theme */
+.mapboxgl-ctrl-geocoder {
+  background-color: #1a1a2e !important;
+  color: #ffffff !important;
+  border: 1px solid #2a2a3e !important;
+  border-radius: 12px !important;
+  font-family: 'Inter', sans-serif !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4) !important;
+  min-width: 280px !important;
+}
+
+.mapboxgl-ctrl-geocoder input {
+  color: #ffffff !important;
+  font-size: 14px !important;
+}
+
+.mapboxgl-ctrl-geocoder input::placeholder {
+  color: #6a6a8a !important;
+}
+
+.mapboxgl-ctrl-geocoder .suggestions {
+  background-color: #1a1a2e !important;
+  border: 1px solid #2a2a3e !important;
+  border-radius: 0 0 12px 12px !important;
+}
+
+.mapboxgl-ctrl-geocoder .suggestions > li > a {
+  color: #ffffff !important;
+}
+
+.mapboxgl-ctrl-geocoder .suggestions > .active > a,
+.mapboxgl-ctrl-geocoder .suggestions > li > a:hover {
+  background-color: #2a2a3e !important;
+  color: #ff2d55 !important;
+}
+
+.mapboxgl-ctrl-geocoder .mapboxgl-ctrl-geocoder--icon-search {
+  fill: #ff2d55 !important;
+}
+
+.mapboxgl-ctrl-geocoder .mapboxgl-ctrl-geocoder--button {
+  background-color: transparent !important;
+}
+
+.mapboxgl-ctrl-geocoder .mapboxgl-ctrl-geocoder--icon-close {
+  fill: #6a6a8a !important;
+}
+
+.mapboxgl-ctrl-geocoder .mapboxgl-ctrl-geocoder--icon-loading {
+  fill: #ff2d55 !important;
+}
+
+/* Hide default mapbox controls */
+.mapboxgl-ctrl-bottom-left,
+.mapboxgl-ctrl-bottom-right {
+  opacity: 0.3;
+  transition: opacity 0.3s;
+}
+
+.mapboxgl-ctrl-bottom-left:hover,
+.mapboxgl-ctrl-bottom-right:hover {
+  opacity: 1;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0a0f;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a2a3e;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a4e;
+}
+
+/* Route card animations */
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.route-card-enter {
+  animation: slideIn 0.3s ease-out forwards;
+}
+
+/* Thrill bar glow */
+.thrill-bar-glow {
+  box-shadow: 0 0 12px rgba(255, 45, 85, 0.4);
+}
+
+/* Pulse animation for loading */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.loading-pulse {
+  animation: pulse-glow 1.5s ease-in-out infinite;
+}
