@@ -79,6 +79,23 @@ html, body {
   opacity: 1;
 }
 
+/* Floor-it event popup styling */
+.hotfix-event-popup .maplibregl-popup-content {
+  background: transparent !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+  border-radius: 12px !important;
+}
+
+.hotfix-event-popup .maplibregl-popup-tip {
+  border-top-color: #0d0d1a !important;
+  border-bottom-color: #0d0d1a !important;
+}
+
+.hotfix-event-popup .maplibregl-popup-close-button {
+  display: none;
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;
