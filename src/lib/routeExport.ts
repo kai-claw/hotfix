@@ -2,124 +2,146 @@
  * Route Export — Generate navigation app links + GPX files
  * 
  * Supports:
- * - Apple Maps URL (maps:// scheme with waypoints)
- * - Google Maps URL (via waypoints)
- * - GPX file download (universal)
+ * - Apple Maps URL (14 waypoints via +to: separator)
+ * - Google Maps URL (20 waypoints via path format)
+ * - Waze URL (single destination)
+ * - GPX file download (every coordinate — max accuracy)
  */
 
 import type { ScoredRoute } from '../types/route'
 
 /**
- * Sample waypoints along a route, emphasizing key turns and direction changes.
- * More points = more accurate route reproduction in nav apps.
+ * Sample waypoints along a route, prioritizing turns and decision points.
+ * These are the points where a nav app could choose the wrong road
+ * if we don't pin them down. More points = better route fidelity.
  */
 function sampleWaypoints(
   coords: [number, number][],
-  maxPoints: number = 15
+  maxPoints: number = 20
 ): [number, number][] {
   if (coords.length <= maxPoints) return coords
 
-  // Always include start and end
-  const result: [number, number][] = [coords[0]]
-
-  // Pick points at regular intervals plus points where direction changes significantly
-  const step = Math.max(1, Math.floor(coords.length / (maxPoints - 2)))
-
-  for (let i = step; i < coords.length - 1; i += step) {
-    // Check if there's a significant turn near this point
-    let bestIdx = i
-    let bestAngleChange = 0
-    const searchRadius = Math.min(step, 20)
-
-    for (let j = Math.max(1, i - searchRadius); j < Math.min(coords.length - 1, i + searchRadius); j++) {
-      if (j < 1 || j >= coords.length - 1) continue
-      const angle1 = Math.atan2(
-        coords[j][1] - coords[j - 1][1],
-        coords[j][0] - coords[j - 1][0]
-      )
-      const angle2 = Math.atan2(
-        coords[j + 1][1] - coords[j][1],
-        coords[j + 1][0] - coords[j][0]
-      )
-      let change = Math.abs(angle2 - angle1)
-      if (change > Math.PI) change = 2 * Math.PI - change
-      if (change > bestAngleChange) {
-        bestAngleChange = change
-        bestIdx = j
-      }
+  // Phase 1: Find ALL significant turns (heading change > 20°)
+  const turnScores: { idx: number; score: number }[] = []
+  // Use a 3-point window with a gap for noise resistance
+  const gap = Math.max(2, Math.floor(coords.length / 200))
+  for (let i = gap; i < coords.length - gap; i++) {
+    const angle1 = Math.atan2(
+      coords[i][1] - coords[i - gap][1],
+      coords[i][0] - coords[i - gap][0]
+    )
+    const angle2 = Math.atan2(
+      coords[i + gap][1] - coords[i][1],
+      coords[i + gap][0] - coords[i][0]
+    )
+    let change = Math.abs(angle2 - angle1)
+    if (change > Math.PI) change = 2 * Math.PI - change
+    if (change > 0.35) { // ~20 degrees
+      turnScores.push({ idx: i, score: change })
     }
-
-    result.push(coords[bestIdx])
-    if (result.length >= maxPoints - 1) break
   }
 
-  // Always include the last point
-  result.push(coords[coords.length - 1])
+  // Sort by turn sharpness (biggest turns first)
+  turnScores.sort((a, b) => b.score - a.score)
 
-  return result
+  // Phase 2: Greedily pick turn points with minimum spacing
+  const minSpacing = Math.floor(coords.length / (maxPoints * 1.5))
+  const picked = new Set<number>([0, coords.length - 1])
+  const result: number[] = [0]
+
+  for (const { idx } of turnScores) {
+    if (result.length >= maxPoints - 1) break
+    const tooClose = [...picked].some(p => Math.abs(p - idx) < minSpacing)
+    if (!tooClose) {
+      result.push(idx)
+      picked.add(idx)
+    }
+  }
+
+  // Phase 3: Fill remaining slots with evenly-spaced points
+  const remaining = maxPoints - result.length - 1 // -1 for end
+  if (remaining > 0) {
+    const step = Math.floor(coords.length / (remaining + 1))
+    for (let i = step; result.length < maxPoints - 1 && i < coords.length - 1; i += step) {
+      const tooClose = [...picked].some(p => Math.abs(p - i) < Math.floor(minSpacing / 2))
+      if (!tooClose) {
+        result.push(i)
+        picked.add(i)
+      }
+    }
+  }
+
+  // End point
+  result.push(coords.length - 1)
+
+  // Sort by index order (route sequence matters!)
+  result.sort((a, b) => a - b)
+
+  return result.map(i => coords[i])
+}
+
+/** Format a coordinate pair as "lat,lng" with 6 decimal places */
+function fmtCoord([lng, lat]: [number, number]): string {
+  return `${lat.toFixed(6)},${lng.toFixed(6)}`
+}
+
+/** Check if a route is a loop (start ≈ end) */
+function isLoopRoute(coords: [number, number][]): boolean {
+  const s = coords[0], e = coords[coords.length - 1]
+  return Math.abs(s[0] - e[0]) < 0.001 && Math.abs(s[1] - e[1]) < 0.001
 }
 
 /**
  * Generate Apple Maps URL
- * Uses maps.apple.com which opens Apple Maps app on iOS.
  * 
- * Apple Maps only reliably supports ~3-5 stops via URL.
- * We use 4 carefully-chosen waypoints (key turns) so the route
- * actually renders instead of silently failing.
+ * Apple Maps supports up to 14 stops via the +to: separator in daddr.
+ * We use 13 sampled waypoints + the start = 14 total points of route fidelity.
+ * Format: https://maps.apple.com/?saddr=LAT,LNG&daddr=LAT,LNG+to:LAT,LNG&dirflg=d
  */
 export function getAppleMapsUrl(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
   if (coords.length < 2) return ''
 
-  const start = coords[0]
-  const end = coords[coords.length - 1]
-  // Apple Maps chokes on many waypoints — use 4 key turn points max
-  const waypoints = sampleWaypoints(coords, 6) // start + 4 mid + end
+  // 14 total points: saddr (1) + daddr stops (13)
+  const waypoints = sampleWaypoints(coords, 14)
+  const start = waypoints[0]
 
-  // Build daddr with +to: separator (skip start, include all stops through end)
-  const stops = waypoints.slice(1)
-  
-  // Check if route is a loop (start ≈ end)
-  const isLoop = Math.abs(start[0] - end[0]) < 0.001 && Math.abs(start[1] - end[1]) < 0.001
-  
-  // For loops, make sure the last stop is the start point
-  if (isLoop) {
-    stops[stops.length - 1] = start
+  // Build the daddr stops (everything after start)
+  const stops = waypoints.slice(1).map(fmtCoord)
+
+  // For loops, ensure the last stop returns to start
+  if (isLoopRoute(coords)) {
+    stops[stops.length - 1] = fmtCoord(start)
   }
 
-  const waypointStr = stops
-    .map(([lng, lat]) => `${lat},${lng}`)
-    .join('+to:')
-
-  return `https://maps.apple.com/?saddr=${start[1]},${start[0]}&daddr=${waypointStr}&dirflg=d`
+  return `https://maps.apple.com/?saddr=${fmtCoord(start)}&daddr=${stops.join('+to:')}&dirflg=d`
 }
 
 /**
  * Generate Google Maps URL
- * Google Maps supports waypoints in the URL
+ * 
+ * Uses the path-based format: /maps/dir/lat,lng/lat,lng/...
+ * This is the same format Google Maps generates when sharing routes.
+ * Supports ~23 waypoints, no query encoding issues.
+ * We use 20 turn-sampled waypoints for high route fidelity.
  */
 export function getGoogleMapsUrl(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
   if (coords.length < 2) return ''
 
-  // Google Maps URL has a length limit (~2048 chars) so we need fewer points
-  // but use the turn-detection sampling for better accuracy
-  const waypoints = sampleWaypoints(coords, 10)
+  // 20 waypoints for excellent route reproduction
+  const waypoints = sampleWaypoints(coords, 20)
 
-  const start = waypoints[0]
-  const end = waypoints[waypoints.length - 1]
-  const mid = waypoints.slice(1, -1)
-
-  // Use the Google Maps directions URL with waypoints parameter
-  const origin = `${start[1]},${start[0]}`
-  const destination = `${end[1]},${end[0]}`
-
-  if (mid.length > 0) {
-    const waypointStr = mid.map(([lng, lat]) => `${lat},${lng}`).join('|')
-    return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypointStr)}&travelmode=driving`
+  // For loops, ensure the last point returns to start
+  if (isLoopRoute(coords)) {
+    waypoints[waypoints.length - 1] = waypoints[0]
   }
 
-  return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=driving`
+  // Path-based format — each coordinate is a path segment
+  // No encoding needed, works on web and mobile app
+  const path = waypoints.map(fmtCoord).join('/')
+
+  return `https://www.google.com/maps/dir/${path}`
 }
 
 /**

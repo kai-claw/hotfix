@@ -35,29 +35,41 @@ export default function ExportMenu({ route }: ExportMenuProps) {
 
   const ios = isIOS()
 
+  const copyToClipboard = (url: string) => {
+    navigator.clipboard.writeText(url).catch(() => {
+      const input = document.createElement('input')
+      input.value = url
+      document.body.appendChild(input)
+      input.select()
+      document.execCommand('copy')
+      document.body.removeChild(input)
+    })
+  }
+
   const options = [
+    // Primary nav apps — order by platform
     ...(ios
-      ? [{ label: '🍎 Open in Apple Maps', action: () => window.open(getAppleMapsUrl(route), '_blank') }]
-      : []),
-    { label: '📍 Open in Google Maps', action: () => window.open(getGoogleMapsUrl(route), '_blank') },
+      ? [
+          { label: '🍎 Apple Maps (14 pts)', action: () => window.open(getAppleMapsUrl(route), '_blank') },
+          { label: '📍 Google Maps (20 pts)', action: () => window.open(getGoogleMapsUrl(route), '_blank') },
+        ]
+      : [
+          { label: '📍 Google Maps (20 pts)', action: () => window.open(getGoogleMapsUrl(route), '_blank') },
+          { label: '🍎 Apple Maps (14 pts)', action: () => window.open(getAppleMapsUrl(route), '_blank') },
+        ]),
     { label: '🚗 Open in Waze', action: () => window.open(getWazeUrl(route), '_blank') },
-    ...(!ios
-      ? [{ label: '🍎 Apple Maps Link', action: () => window.open(getAppleMapsUrl(route), '_blank') }]
-      : []),
-    { label: '📥 Download GPX', action: () => downloadGpx(route) },
+    { label: '📥 Download GPX (exact)', action: () => downloadGpx(route) },
     {
-      label: '📋 Copy Link',
+      label: '📋 Copy Google Maps Link',
       action: () => {
-        const url = ios ? getAppleMapsUrl(route) : getGoogleMapsUrl(route)
-        navigator.clipboard.writeText(url).catch(() => {
-          // Fallback
-          const input = document.createElement('input')
-          input.value = url
-          document.body.appendChild(input)
-          input.select()
-          document.execCommand('copy')
-          document.body.removeChild(input)
-        })
+        copyToClipboard(getGoogleMapsUrl(route))
+        setIsOpen(false)
+      },
+    },
+    {
+      label: '📋 Copy Apple Maps Link',
+      action: () => {
+        copyToClipboard(getAppleMapsUrl(route))
         setIsOpen(false)
       },
     },
