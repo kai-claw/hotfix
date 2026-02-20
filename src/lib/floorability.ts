@@ -240,10 +240,11 @@ function minCredibleSpeed(highway: string): number {
 function isHighwayTypeCompatible(
   overpassHighway: string,
   routeStepName: string,
-  _routeStepRef: string
+  routeStepRef: string
 ): boolean {
-  // If the route step name suggests a major road, don't accept residential/tertiary
+  // If the route step name or ref suggests a major road, don't accept residential/tertiary
   const nameLower = routeStepName.toLowerCase()
+  const refLower = routeStepRef.toLowerCase()
   const isMajorRoute =
     nameLower.includes('parkway') ||
     nameLower.includes('highway') ||
@@ -254,7 +255,11 @@ function isHighwayTypeCompatible(
     nameLower.includes('thruway') ||
     nameLower.includes('i-') ||
     nameLower.includes('us-') ||
-    nameLower.includes('us ')
+    nameLower.includes('us ') ||
+    refLower.startsWith('i ') ||
+    refLower.startsWith('us ') ||
+    refLower.startsWith('ny ') ||
+    refLower.startsWith('sr ')
 
   const lowTypeWay =
     overpassHighway === 'residential' ||
