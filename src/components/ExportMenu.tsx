@@ -5,7 +5,6 @@ import {
   getGoogleMapsUrl,
   getWazeUrl,
   downloadGpx,
-  isIOS,
 } from '../lib/routeExport'
 
 interface ExportMenuProps {
@@ -33,8 +32,6 @@ export default function ExportMenu({ route }: ExportMenuProps) {
     }
   }, [isOpen])
 
-  const ios = isIOS()
-
   const copyToClipboard = (url: string) => {
     navigator.clipboard.writeText(url).catch(() => {
       const input = document.createElement('input')
@@ -47,29 +44,16 @@ export default function ExportMenu({ route }: ExportMenuProps) {
   }
 
   const options = [
-    // Primary nav apps — order by platform
-    ...(ios
-      ? [
-          { label: '🍎 Apple Maps (14 pts)', action: () => window.open(getAppleMapsUrl(route), '_blank') },
-          { label: '📍 Google Maps (20 pts)', action: () => window.open(getGoogleMapsUrl(route), '_blank') },
-        ]
-      : [
-          { label: '📍 Google Maps (20 pts)', action: () => window.open(getGoogleMapsUrl(route), '_blank') },
-          { label: '🍎 Apple Maps (14 pts)', action: () => window.open(getAppleMapsUrl(route), '_blank') },
-        ]),
+    // Google Maps is the primary — 20 waypoints, full route fidelity
+    { label: '📍 Google Maps (full route)', action: () => window.open(getGoogleMapsUrl(route), '_blank') },
     { label: '🚗 Open in Waze', action: () => window.open(getWazeUrl(route), '_blank') },
+    // Apple Maps can only do A→B (no multi-stop URL support)
+    { label: '🍎 Apple Maps (A→B only)', action: () => window.open(getAppleMapsUrl(route), '_blank') },
     { label: '📥 Download GPX (exact)', action: () => downloadGpx(route) },
     {
       label: '📋 Copy Google Maps Link',
       action: () => {
         copyToClipboard(getGoogleMapsUrl(route))
-        setIsOpen(false)
-      },
-    },
-    {
-      label: '📋 Copy Apple Maps Link',
-      action: () => {
-        copyToClipboard(getAppleMapsUrl(route))
         setIsOpen(false)
       },
     },

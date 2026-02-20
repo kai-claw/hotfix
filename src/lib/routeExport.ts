@@ -94,31 +94,43 @@ function isLoopRoute(coords: [number, number][]): boolean {
 /**
  * Generate Apple Maps URL
  * 
- * Apple Maps supports up to 14 stops via the +to: separator in daddr.
- * We use 13 sampled waypoints + the start = 14 total points of route fidelity.
- * Format: https://maps.apple.com/?saddr=LAT,LNG&daddr=LAT,LNG+to:LAT,LNG&dirflg=d
+ * IMPORTANT: Apple Maps web URLs (maps.apple.com) do NOT support multi-stop
+ * directions. The "+to:" separator is a legacy Google Maps convention that
+ * Apple Maps ignores — it treats the whole daddr as one address string.
+ * 
+ * Best we can do: single A→B direction from start to farthest waypoint,
+ * which at least gets you driving in the right direction on the route.
+ * For full route fidelity, use Google Maps (20 waypoints) or GPX.
  */
 export function getAppleMapsUrl(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
   if (coords.length < 2) return ''
 
-  // 14 total points: saddr (1) + daddr stops (13)
-  const waypoints = sampleWaypoints(coords, 14)
-  const start = waypoints[0]
+  const start = coords[0]
 
-  // Build the daddr stops (everything after start)
-  const stops = waypoints.slice(1).map(fmtCoord)
-
-  // For loops, ensure the last stop returns to start
   if (isLoopRoute(coords)) {
-    stops[stops.length - 1] = fmtCoord(start)
+    // For loops: navigate to the farthest point from start (apex of the loop).
+    // This gets you driving the first half of the route correctly.
+    let farthestIdx = 0
+    let maxDist = 0
+    for (let i = 0; i < coords.length; i++) {
+      const d = (coords[i][0] - start[0]) ** 2 + (coords[i][1] - start[1]) ** 2
+      if (d > maxDist) {
+        maxDist = d
+        farthestIdx = i
+      }
+    }
+    const apex = coords[farthestIdx]
+    return `https://maps.apple.com/?saddr=${fmtCoord(start)}&daddr=${fmtCoord(apex)}&dirflg=d`
   }
 
-  return `https://maps.apple.com/?saddr=${fmtCoord(start)}&daddr=${stops.join('+to:')}&dirflg=d`
+  // A→B route: simple start to end
+  const end = coords[coords.length - 1]
+  return `https://maps.apple.com/?saddr=${fmtCoord(start)}&daddr=${fmtCoord(end)}&dirflg=d`
 }
 
 /**
- * Generate Google Maps URL
+ * Generate Google Maps URL — PRIMARY NAV EXPORT
  * 
  * Uses the path-based format: /maps/dir/lat,lng/lat,lng/...
  * This is the same format Google Maps generates when sharing routes.
