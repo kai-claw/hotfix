@@ -1,5 +1,6 @@
 import type { MapboxRoute, ScoredRoute } from '../types/route'
 import { generateRouteName, generateHighlights } from './routeNamer'
+import { osrmFetch, routePathWithAlts } from './osrm'
 
 // Route colors — ordered by visual distinctness
 const ROUTE_COLORS = [
@@ -9,9 +10,6 @@ const ROUTE_COLORS = [
   '#a855f7', // Purple
   '#22c55e', // Green
 ]
-
-// OSRM public demo server for routing (alternatives supported)
-const OSRM_BASE = 'https://router.project-osrm.org'
 
 interface OSRMRoute {
   distance: number
@@ -45,9 +43,9 @@ export async function fetchRoutes(
   origin: [number, number],
   destination: [number, number]
 ): Promise<ScoredRoute[]> {
-  const url = `${OSRM_BASE}/route/v1/driving/${origin[0]},${origin[1]};${destination[0]},${destination[1]}?alternatives=true&geometries=geojson&overview=full&steps=true`
+  const coords = `${origin[0]},${origin[1]};${destination[0]},${destination[1]}`
 
-  const response = await fetch(url)
+  const response = await osrmFetch(routePathWithAlts(coords))
   if (!response.ok) {
     throw new Error(`Routing error: ${response.status} ${response.statusText}`)
   }

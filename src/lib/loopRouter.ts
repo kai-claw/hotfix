@@ -12,6 +12,7 @@
 
 import type { MapboxRoute, ScoredRoute } from '../types/route'
 import { analyzeFloorability, queryOverpass, type FloorabilityResult } from './floorability'
+import { osrmFetch, routePath, tripPath } from './osrm'
 
 export type LoopDuration = 15 | 30 | 60
 export type LoopStyle = 'highway' | 'backroad' | 'mixed' | 'best'
@@ -65,36 +66,7 @@ function generateWaypoints(
   })
 }
 
-// ─── OSRM Route Fetching ──────────────────────────────
-
-/**
- * Build OSRM route URL for a loop: start → waypoint(s) → start
- */
-function buildLoopUrl(
-  start: [number, number],
-  waypoints: [number, number][]
-): string {
-  const coords = [start, ...waypoints, start]
-    .map(([lng, lat]) => `${lng},${lat}`)
-    .join(';')
-
-  return `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=true`
-}
-
-/**
- * Build OSRM trip URL for round-trip optimization (Fix 2A)
- * The trip endpoint optimizes waypoint ordering for round trips.
- */
-function buildTripUrl(
-  start: [number, number],
-  waypoints: [number, number][]
-): string {
-  const coords = [start, ...waypoints]
-    .map(([lng, lat]) => `${lng},${lat}`)
-    .join(';')
-
-  return `https://router.project-osrm.org/trip/v1/driving/${coords}?source=first&destination=last&roundtrip=true&geometries=geojson&overview=full&steps=true`
-}
+// ─── OSRM Route Fetching (with failover via osrm.ts) ──
 
 interface OSRMStepRaw {
   name: string
@@ -129,28 +101,19 @@ function parseLeg(leg: OSRMLegRaw) {
   }
 }
 
-/** Fetch with a timeout — prevents hanging on slow/dead OSRM responses */
-async function fetchWithTimeout(url: string, timeoutMs: number = 8000): Promise<Response> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const response = await fetch(url, { signal: controller.signal })
-    return response
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 /**
  * Fetch a single loop route from OSRM using the route endpoint
+ * Uses osrmFetch for automatic failover between servers.
  */
 async function fetchLoopRoute(
   start: [number, number],
   waypoints: [number, number][]
 ): Promise<MapboxRoute | null> {
   try {
-    const url = buildLoopUrl(start, waypoints)
-    const response = await fetchWithTimeout(url)
+    const coords = [start, ...waypoints, start]
+      .map(([lng, lat]) => `${lng},${lat}`)
+      .join(';')
+    const response = await osrmFetch(routePath(coords))
     if (!response.ok) return null
 
     const data = await response.json()
@@ -173,14 +136,17 @@ async function fetchLoopRoute(
 /**
  * Fetch a round-trip route using OSRM's trip endpoint (Fix 2A)
  * Falls back to regular route endpoint on failure.
+ * Uses osrmFetch for automatic failover between servers.
  */
 async function fetchTripRoute(
   start: [number, number],
   waypoints: [number, number][]
 ): Promise<MapboxRoute | null> {
   try {
-    const url = buildTripUrl(start, waypoints)
-    const response = await fetchWithTimeout(url)
+    const coords = [start, ...waypoints]
+      .map(([lng, lat]) => `${lng},${lat}`)
+      .join(';')
+    const response = await osrmFetch(tripPath(coords))
     if (!response.ok) {
       return fetchLoopRoute(start, waypoints)
     }
@@ -597,10 +563,15 @@ export async function generateLoopRoutes(
   // Take the best ones, preferring diversity (not all the same shape)
   filtered = quality.slice(0, 8)
 
-  // Take top candidates for floorability scoring (limit to reduce API calls)
-  // Score a few extra to have fallbacks after min-score filtering
-  const scoreCount = Math.min(filtered.length, maxResults + 2)
+  // Take top candidates for floorability scoring
+  // Score more than we need for fallbacks after min-score filtering
+  const scoreCount = Math.min(filtered.length, Math.max(maxResults + 2, 6))
   const topCandidates = filtered.slice(0, scoreCount)
+
+  if (topCandidates.length === 0) {
+    throw new Error('Routing service unavailable or no valid routes in this area. Try again in a moment.')
+  }
+
   return scoreCandidates(topCandidates, start, onProgress, maxResults)
 }
 

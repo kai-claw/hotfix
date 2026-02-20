@@ -34,6 +34,10 @@ export default function BottomSheet({ children }: BottomSheetProps) {
     if (loadingState === 'loading') {
       setPosition('loading')
     }
+    // Show error state properly
+    if (loadingState === 'error') {
+      setPosition('peek')
+    }
   }, [loadingState])
 
   // Auto-collapse when idle
