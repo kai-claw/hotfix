@@ -70,8 +70,9 @@ export async function fetchRoutes(
       distance: leg.distance,
       duration: leg.duration,
       summary: leg.summary,
-      steps: leg.steps.map((step) => ({
+      steps: leg.steps.map((step: { name: string; ref?: string; distance: number; duration: number; maneuver: { type: string; instruction: string } }) => ({
         name: step.name,
+        ref: step.ref || '',
         distance: step.distance,
         duration: step.duration,
         maneuver: {

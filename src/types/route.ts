@@ -5,6 +5,7 @@ export interface RoutePoint {
 
 export interface RouteStep {
   name: string
+  ref: string           // highway reference (e.g., "US 9", "I-87")
   distance: number
   duration: number
   maneuver: {

@@ -3,7 +3,7 @@ import { useIsMobile } from '../hooks/useMediaQuery'
 import RouteCard from './RouteCard'
 
 export default function RouteSidebar() {
-  const { mode, routes, loopRoutes, selectedRouteId, selectRoute, loadingState, loadingStage, loadingProgress, error } =
+  const { mode, routes, loopRoutes, selectedRouteId, selectRoute, loadingState, loadingStage, loadingProgress, error, lowFloorabilityWarning } =
     useRouteStore()
   const isMobile = useIsMobile()
 
@@ -112,10 +112,20 @@ export default function RouteSidebar() {
             {displayRoutes.length} option{displayRoutes.length !== 1 ? 's' : ''}
           </span>
         </div>
-        {isLoop && (
+        {isLoop && !lowFloorabilityWarning && (
           <p className="text-[10px] text-[#4a4a5a] mt-0.5">
             Ranked by floorability — speed transitions, launches & merges
           </p>
+        )}
+        {isLoop && lowFloorabilityWarning && (
+          <div className="mt-1 px-2 py-1.5 rounded-lg bg-[#ffb80010] border border-[#ffb80020]">
+            <p className="text-[10px] text-[#ffb800] font-semibold">
+              ⚠️ Limited floor-it opportunities in this area
+            </p>
+            <p className="text-[9px] text-[#6a6a8a] mt-0.5">
+              Try a different starting point or longer duration for better routes.
+            </p>
+          </div>
         )}
       </div>
 

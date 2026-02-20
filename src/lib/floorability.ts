@@ -7,7 +7,13 @@
  * - On-ramp merges (highway acceleration zones)
  * - Acceleration runway (uninterrupted distance after a floor-it event)
  * - Road quality (surface, lanes, smoothness)
+ * 
+ * FIX 1: Speed data integrity — matches Overpass ways to route steps
+ * by road name, not just proximity. Prevents cross-street speed limits
+ * from contaminating the speed profile.
  */
+
+import type { RouteLeg } from '../types/route'
 
 // ─── Types ────────────────────────────────────────────
 
@@ -60,6 +66,209 @@ export interface FloorabilityResult {
   floorItCount: number // total number of floor-it events
 }
 
+// ─── Route Step Mapping ───────────────────────────────
+
+/** Maps a range of route coordinate indices to a road name & ref */
+interface RouteStepSegment {
+  name: string
+  ref: string
+  startIdx: number
+  endIdx: number
+}
+
+/**
+ * Build a map from route coordinate indices to road names.
+ * Uses cumulative distances along route coords matched to step distances.
+ */
+function buildStepMap(
+  coords: [number, number][],
+  legs: RouteLeg[]
+): RouteStepSegment[] {
+  if (!legs?.length || coords.length < 2) return []
+
+  // Build cumulative distance along route coords (in meters for matching with step.distance)
+  const cumDist: number[] = [0]
+  for (let i = 1; i < coords.length; i++) {
+    const d = haversineDistMi(coords[i - 1][1], coords[i - 1][0], coords[i][1], coords[i][0])
+    cumDist.push(cumDist[i - 1] + d * 1609.34) // convert to meters
+  }
+
+  const segments: RouteStepSegment[] = []
+  let currentDistM = 0
+
+  for (const leg of legs) {
+    for (const step of leg.steps) {
+      const startDistM = currentDistM
+      const endDistM = currentDistM + step.distance
+
+      // Find coord indices for this distance range
+      let startIdx = 0
+      let endIdx = coords.length - 1
+
+      for (let i = 0; i < cumDist.length; i++) {
+        if (cumDist[i] >= startDistM) {
+          startIdx = i
+          break
+        }
+      }
+      for (let i = startIdx; i < cumDist.length; i++) {
+        if (cumDist[i] >= endDistM) {
+          endIdx = i
+          break
+        }
+      }
+
+      if (step.name) {
+        segments.push({
+          name: step.name,
+          ref: step.ref || '',
+          startIdx,
+          endIdx,
+        })
+      }
+
+      currentDistM = endDistM
+    }
+  }
+
+  return segments
+}
+
+/**
+ * Get the road name at a given route coordinate index.
+ */
+function getRoadNameAtIndex(idx: number, stepMap: RouteStepSegment[]): string {
+  for (const seg of stepMap) {
+    if (idx >= seg.startIdx && idx <= seg.endIdx) return seg.name
+  }
+  return ''
+}
+
+/**
+ * Get the road ref at a given route coordinate index.
+ */
+function getRoadRefAtIndex(idx: number, stepMap: RouteStepSegment[]): string {
+  for (const seg of stepMap) {
+    if (idx >= seg.startIdx && idx <= seg.endIdx) return seg.ref
+  }
+  return ''
+}
+
+// ─── Road Name Matching ──────────────────────────────
+
+/**
+ * Normalize a road name for comparison.
+ * Handles common abbreviation differences between OSRM and OSM data.
+ */
+function normalizeRoadName(name: string): string {
+  return name.toLowerCase()
+    .replace(/\bstreet\b/gi, 'st')
+    .replace(/\bavenue\b/gi, 'ave')
+    .replace(/\bboulevard\b/gi, 'blvd')
+    .replace(/\bdrive\b/gi, 'dr')
+    .replace(/\broad\b/gi, 'rd')
+    .replace(/\blane\b/gi, 'ln')
+    .replace(/\bparkway\b/gi, 'pkwy')
+    .replace(/\bpky\b/gi, 'pkwy')
+    .replace(/\bhighway\b/gi, 'hwy')
+    .replace(/\bexpressway\b/gi, 'expy')
+    .replace(/\bturnpike\b/gi, 'tpk')
+    .replace(/\btpke\b/gi, 'tpk')
+    .replace(/\bcircle\b/gi, 'cir')
+    .replace(/\bcourt\b/gi, 'ct')
+    .replace(/\bplace\b/gi, 'pl')
+    .replace(/\bterrace\b/gi, 'ter')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Check if two road names likely refer to the same road.
+ * Uses normalized comparison + substring matching for partial names.
+ */
+function roadNamesMatch(name1: string, name2: string): boolean {
+  if (!name1 || !name2) return false
+
+  const n1 = normalizeRoadName(name1)
+  const n2 = normalizeRoadName(name2)
+
+  // Exact match after normalization
+  if (n1 === n2) return true
+
+  // One contains the other (handles "Taconic State Pkwy" vs "Taconic")
+  if (n1.length >= 5 && n2.length >= 5) {
+    if (n1.includes(n2) || n2.includes(n1)) return true
+  }
+
+  // Check if significant words overlap (at least 2 words match)
+  const words1 = new Set(n1.split(' ').filter(w => w.length >= 3))
+  const words2 = new Set(n2.split(' ').filter(w => w.length >= 3))
+  let matchCount = 0
+  for (const w of words1) {
+    if (words2.has(w)) matchCount++
+  }
+  if (matchCount >= 2) return true
+
+  return false
+}
+
+// ─── Highway Type Compatibility ──────────────────────
+
+/** High-speed road types that should never have very low speed limits */
+const HIGH_SPEED_HIGHWAY_TYPES = new Set([
+  'motorway', 'trunk', 'motorway_link', 'trunk_link',
+  'primary', // primaries are usually 35+
+])
+
+/** Minimum credible speed (mph) for a given highway type */
+function minCredibleSpeed(highway: string): number {
+  switch (highway) {
+    case 'motorway': return 40
+    case 'trunk': return 35
+    case 'motorway_link': return 25
+    case 'trunk_link': return 25
+    case 'primary': return 25
+    default: return 10
+  }
+}
+
+/**
+ * Check if an Overpass way's highway type is compatible with the route at a position.
+ * Prevents matching a residential cross-street's speed to a motorway segment.
+ */
+function isHighwayTypeCompatible(
+  overpassHighway: string,
+  routeStepName: string,
+  _routeStepRef: string
+): boolean {
+  // If the route step name suggests a major road, don't accept residential/tertiary
+  const nameLower = routeStepName.toLowerCase()
+  const isMajorRoute =
+    nameLower.includes('parkway') ||
+    nameLower.includes('highway') ||
+    nameLower.includes('interstate') ||
+    nameLower.includes('expressway') ||
+    nameLower.includes('turnpike') ||
+    nameLower.includes('freeway') ||
+    nameLower.includes('thruway') ||
+    nameLower.includes('i-') ||
+    nameLower.includes('us-') ||
+    nameLower.includes('us ')
+
+  const lowTypeWay =
+    overpassHighway === 'residential' ||
+    overpassHighway === 'tertiary' ||
+    overpassHighway === 'unclassified' ||
+    overpassHighway === 'service' ||
+    overpassHighway === 'living_street'
+
+  // Major route should not get speed data from low-type roads
+  if (isMajorRoute && lowTypeWay) return false
+
+  return true
+}
+
 // ─── Overpass API ─────────────────────────────────────
 
 interface OverpassElement {
@@ -77,7 +286,8 @@ interface OverpassResponse {
 }
 
 /**
- * Query Overpass API for road data near a route
+ * Query Overpass API for road data near a route.
+ * Uses tight radius (50m) for speed limit data to avoid cross-street contamination.
  */
 export async function queryOverpass(
   routeCoords: [number, number][],
@@ -104,13 +314,15 @@ export async function queryOverpass(
   // Build poly string for around filter: lat1,lng1,lat2,lng2,...
   const polyStr = finalSampled.map(([lng, lat]) => `${lat},${lng}`).join(',')
 
+  // FIX 1: Reduced radius from 150m to 50m for speed data
+  // Keeps 150m for signals and road quality, 250m for ramp detection
   const query = `
 [out:json][timeout:25];
 (
-  way(around:150,${polyStr})["maxspeed"];
+  way(around:50,${polyStr})["maxspeed"];
   node(around:150,${polyStr})["highway"="traffic_signals"];
   way(around:250,${polyStr})["highway"="motorway_link"];
-  way(around:150,${polyStr})["highway"~"^(motorway|trunk|primary|secondary)$"]["lanes"];
+  way(around:100,${polyStr})["highway"~"^(motorway|trunk|primary|secondary)$"]["lanes"];
 );
 out body geom;
 `
@@ -271,9 +483,16 @@ function lerpHex(a: string, b: string, t: number): string {
 
 // ─── Core Scoring Engine ──────────────────────────────
 
+/**
+ * Analyze a route's floorability score.
+ * 
+ * FIX 1: Now accepts route legs to build a step map for name-based
+ * speed data matching. Prevents cross-street speed contamination.
+ */
 export function analyzeFloorability(
   routeCoords: [number, number][], // [lng, lat][]
-  overpassData: OverpassResponse
+  overpassData: OverpassResponse,
+  legs?: RouteLeg[]
 ): FloorabilityResult {
   const events: FloorItEvent[] = []
   let speedDeltaRaw = 0
@@ -281,6 +500,10 @@ export function analyzeFloorability(
   let rampMergeRaw = 0
   let runwayRaw = 0
   let roadQualityRaw = 0
+
+  // Build step map for name-based matching (Fix 1)
+  const stepMap = legs ? buildStepMap(routeCoords, legs) : []
+  const hasStepMap = stepMap.length > 0
 
   // ── Extract speed zones from Overpass ways ──
   const speedWays = overpassData.elements.filter(
@@ -298,29 +521,104 @@ export function analyzeFloorability(
     const midGeo = way.geometry[Math.floor(way.geometry.length / 2)]
     const nearest = findNearestPoint(midGeo.lat, midGeo.lon, routeCoords)
 
-    if (nearest.dist < 0.1) { // within ~500ft of route
-      speedProfile.push({
-        idx: nearest.idx,
-        speedMph: speed,
-        roadName: way.tags?.name || 'unnamed',
-        highway: way.tags?.highway || 'road',
-      })
+    // Tighter proximity threshold: 0.04mi (~210ft) instead of 0.1mi
+    if (nearest.dist > 0.04) continue
+
+    const overpassWayName = way.tags?.name || ''
+    const overpassHighway = way.tags?.highway || 'road'
+
+    // ── FIX 1: Name-based matching ──
+    if (hasStepMap) {
+      const routeRoadName = getRoadNameAtIndex(nearest.idx, stepMap)
+      const routeRoadRef = getRoadRefAtIndex(nearest.idx, stepMap)
+
+      // Check 1: Road name must match (or Overpass way is unnamed — accept with caution)
+      if (overpassWayName && routeRoadName) {
+        if (!roadNamesMatch(overpassWayName, routeRoadName)) {
+          // Names don't match — this is likely a cross-street. Skip it.
+          // Exception: if the Overpass way ref matches the route ref, it's the same road
+          const overpassRef = way.tags?.ref || ''
+          if (!overpassRef || !routeRoadRef || overpassRef !== routeRoadRef) {
+            continue
+          }
+        }
+      }
+
+      // Check 2: Highway type compatibility
+      if (routeRoadName && !isHighwayTypeCompatible(overpassHighway, routeRoadName, routeRoadRef)) {
+        continue
+      }
+
+      // Check 3: Sanity — major roads don't suddenly have very low speed limits
+      if (HIGH_SPEED_HIGHWAY_TYPES.has(overpassHighway) && speed < minCredibleSpeed(overpassHighway)) {
+        continue
+      }
+
+      // Check 4: If route step suggests a major road, reject anomalously low speeds
+      const routeNameLower = routeRoadName.toLowerCase()
+      const routeIsMajor =
+        routeNameLower.includes('parkway') ||
+        routeNameLower.includes('highway') ||
+        routeNameLower.includes('interstate') ||
+        routeNameLower.includes('expressway') ||
+        routeNameLower.includes('turnpike') ||
+        routeNameLower.includes('freeway') ||
+        routeNameLower.includes('thruway')
+
+      if (routeIsMajor && speed < 30) {
+        // A parkway/highway at <30mph is almost certainly a cross-street match
+        continue
+      }
     }
+
+    speedProfile.push({
+      idx: nearest.idx,
+      speedMph: speed,
+      roadName: overpassWayName || (hasStepMap ? getRoadNameAtIndex(nearest.idx, stepMap) : 'unnamed'),
+      highway: overpassHighway,
+    })
   }
 
   // Sort by route position
   speedProfile.sort((a, b) => a.idx - b.idx)
 
-  // ── Detect Speed Deltas ──
-  for (let i = 1; i < speedProfile.length; i++) {
-    const prev = speedProfile[i - 1]
+  // Deduplicate: if multiple speed entries at very close indices, keep the one
+  // that best matches the route step name
+  const deduped: typeof speedProfile = []
+  for (let i = 0; i < speedProfile.length; i++) {
     const curr = speedProfile[i]
+    // If the next entry is within 10 indices, pick the better match
+    if (i + 1 < speedProfile.length && Math.abs(speedProfile[i + 1].idx - curr.idx) < 10) {
+      // Keep the one with the higher speed if on a major road (less likely to be a cross-street)
+      const next = speedProfile[i + 1]
+      if (hasStepMap) {
+        const routeName = getRoadNameAtIndex(curr.idx, stepMap)
+        const currMatch = roadNamesMatch(curr.roadName, routeName)
+        const nextMatch = roadNamesMatch(next.roadName, routeName)
+        if (nextMatch && !currMatch) {
+          // Skip current, next is better
+          continue
+        }
+      }
+      deduped.push(curr)
+      i++ // skip next
+    } else {
+      deduped.push(curr)
+    }
+  }
+
+  const finalProfile = deduped.length > 0 ? deduped : speedProfile
+
+  // ── Detect Speed Deltas ──
+  for (let i = 1; i < finalProfile.length; i++) {
+    const prev = finalProfile[i - 1]
+    const curr = finalProfile[i]
     const delta = curr.speedMph - prev.speedMph
 
     if (delta >= 10) {
       // Positive speed transition — floor-it opportunity!
       // Calculate runway: distance of the high-speed stretch
-      const nextChange = speedProfile[i + 1]
+      const nextChange = finalProfile[i + 1]
       const runwayEndIdx = nextChange ? nextChange.idx : Math.min(curr.idx + 200, routeCoords.length - 1)
       let runwayMi = 0
       for (let j = curr.idx; j < runwayEndIdx - 1 && j < routeCoords.length - 1; j++) {
@@ -363,7 +661,7 @@ export function analyzeFloorability(
 
     // Find the speed limit at this signal
     let signalSpeed = 35 // default assumption
-    for (const sp of speedProfile) {
+    for (const sp of finalProfile) {
       if (Math.abs(sp.idx - nearest.idx) < 30) {
         signalSpeed = sp.speedMph
         break

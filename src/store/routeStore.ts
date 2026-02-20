@@ -32,6 +32,7 @@ interface RouteState {
   loadingStage: string
   loadingProgress: number
   error: string | null
+  lowFloorabilityWarning: boolean // Fix 3: true when all routes score below threshold
 
   // Actions
   setOrigin: (point: RoutePoint | null, name?: string) => void
@@ -59,6 +60,7 @@ export const useRouteStore = create<RouteState>((set, get) => ({
   loadingStage: '',
   loadingProgress: 0,
   error: null,
+  lowFloorabilityWarning: false,
 
   setMode: (mode) => {
     set({ mode, routes: [], loopRoutes: [], selectedRouteId: null, loadingState: 'idle', error: null })
@@ -142,6 +144,7 @@ export const useRouteStore = create<RouteState>((set, get) => ({
       selectedRouteId: null,
       loadingStage: 'Generating loops...',
       loadingProgress: 0,
+      lowFloorabilityWarning: false,
     })
 
     try {
@@ -154,11 +157,16 @@ export const useRouteStore = create<RouteState>((set, get) => ({
         },
         loopType
       )
+
+      // Fix 3: Check if all routes are below minimum score threshold
+      const allLowScore = loops.length > 0 && loops.every((l) => l.floorability.totalScore < 25)
+
       set({
         loopRoutes: loops,
         routes: loops, // Also set as routes for map rendering
         selectedRouteId: loops[0]?.id || null,
         loadingState: 'success',
+        lowFloorabilityWarning: allLowScore,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to generate loop routes'
