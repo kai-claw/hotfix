@@ -28,8 +28,6 @@ const DURATION_RADIUS: Record<LoopDuration, number> = {
 
 // How many degrees between waypoint directions
 const WAYPOINT_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
-// Additional angles for more variety
-const EXTRA_ANGLES = [22, 67, 112, 157, 202, 247, 292, 337]
 
 /**
  * Generate waypoints in a circle around a center point
@@ -246,53 +244,51 @@ export async function generateLoopRoutes(
     return generateNearbyLoopRoutes(start, duration, onProgress)
   }
 
-  // Stage 1: Generate waypoints
+  // Stage 1: Generate waypoints — ONLY multi-waypoint loops.
+  // Single-waypoint loops (start→wp→start) almost always U-turn.
+  // We force circular paths by using 2-3 waypoints spread around an arc.
   onProgress?.('Generating waypoints...', 0.1)
-
-  // Use 3-waypoint loops to force variety and prevent U-turns
-  // Instead of start→wp→start (which often U-turns), use start→wp1→wp2→start
-  const singleWps = generateWaypoints(start, radius, WAYPOINT_ANGLES)
-
-  // Double-waypoint loops for proper circles
-  const doubleWps: [number, number][][] = []
-  const shortRadius = radius * 0.6
-  const extraWps = generateWaypoints(start, shortRadius, EXTRA_ANGLES)
-  // Create pairs that form arcs (opposite-ish angles for proper loops)
-  for (let i = 0; i < WAYPOINT_ANGLES.length; i++) {
-    const wpA = generateWaypoints(start, radius * 0.7, [WAYPOINT_ANGLES[i]])[0]
-    const nextAngle = WAYPOINT_ANGLES[(i + 2) % WAYPOINT_ANGLES.length] // skip one for wider arc
-    const wpB = generateWaypoints(start, radius * 0.5, [nextAngle])[0]
-    doubleWps.push([wpA, wpB])
-  }
-  // Also add some with extra angles
-  for (let i = 0; i < extraWps.length; i += 2) {
-    if (i + 1 < extraWps.length) {
-      doubleWps.push([extraWps[i], extraWps[i + 1]])
-    }
-  }
-
-  // Stage 2: Fetch all candidate loop routes in parallel
-  onProgress?.('Calculating routes...', 0.2)
 
   const candidates: { route: MapboxRoute; waypoints: [number, number][] }[] = []
 
-  // Fetch single-wp loops (batch 4 at a time to be nice to OSRM)
-  for (let i = 0; i < singleWps.length; i += 4) {
-    const batch = singleWps.slice(i, i + 4)
-    const results = await Promise.all(
-      batch.map((wp) => fetchLoopRoute(start, [wp]))
-    )
-    results.forEach((route, j) => {
-      if (route) {
-        candidates.push({ route, waypoints: [batch[j]] })
-      }
-    })
-    onProgress?.('Calculating routes...', 0.2 + (i / singleWps.length) * 0.2)
+  // Strategy A: 2-waypoint arc loops (8 combos)
+  // Place wp1 at angle X and wp2 at angle X+90..X+150 to force a one-way loop
+  const arcPairs: [number, number][] = []
+  for (let i = 0; i < WAYPOINT_ANGLES.length; i++) {
+    // Pair each angle with one ~90-135° away for a proper arc
+    const partnerIdx = (i + 2) % WAYPOINT_ANGLES.length // +90°
+    arcPairs.push([WAYPOINT_ANGLES[i], WAYPOINT_ANGLES[partnerIdx]])
+    const widerIdx = (i + 3) % WAYPOINT_ANGLES.length // +135°
+    arcPairs.push([WAYPOINT_ANGLES[i], WAYPOINT_ANGLES[widerIdx]])
   }
 
-  // Fetch double-wp loops
-  for (let i = 0; i < doubleWps.length; i += 3) {
-    const batch = doubleWps.slice(i, i + 3)
+  const doubleWps: [number, number][][] = arcPairs.map(([a1, a2]) => {
+    const wp1 = generateWaypoints(start, radius * 0.75, [a1])[0]
+    const wp2 = generateWaypoints(start, radius * 0.6, [a2])[0]
+    return [wp1, wp2]
+  })
+
+  // Strategy B: 3-waypoint triangle loops (4 combos)
+  // Place waypoints at 120° intervals to force a true circular path
+  const triAngles = [
+    [0, 120, 240],
+    [30, 150, 270],
+    [60, 180, 300],
+    [45, 165, 285],
+  ]
+  const tripleWps: [number, number][][] = triAngles.map((angles) => {
+    return angles.map((a) =>
+      generateWaypoints(start, radius * 0.55, [a])[0]
+    )
+  })
+
+  // Stage 2: Fetch all candidate loop routes
+  onProgress?.('Calculating routes...', 0.2)
+
+  // Fetch 2-waypoint loops (batch 4 at a time)
+  const allWpSets = [...doubleWps, ...tripleWps]
+  for (let i = 0; i < allWpSets.length; i += 4) {
+    const batch = allWpSets.slice(i, i + 4)
     const results = await Promise.all(
       batch.map((wps) => fetchLoopRoute(start, wps))
     )
@@ -301,24 +297,54 @@ export async function generateLoopRoutes(
         candidates.push({ route, waypoints: batch[j] })
       }
     })
+    onProgress?.('Calculating routes...', 0.2 + (i / allWpSets.length) * 0.2)
   }
 
   onProgress?.('Filtering routes...', 0.45)
 
-  // Filter by duration (within 50% of target to allow variety)
+  // Hard filter 1: Duration (within 50% of target)
   const minDuration = targetDurationSec * 0.5
   const maxDuration = targetDurationSec * 1.8
-  const filtered = candidates.filter(
+  let filtered = candidates.filter(
     (c) => c.route.duration >= minDuration && c.route.duration <= maxDuration
   )
 
+  // Hard filter 2: REJECT U-turn routes (>25% road overlap)
+  // This is a hard rule — no U-turns, period.
+  const MAX_OVERLAP = 0.25
+  const beforeOverlapFilter = filtered.length
+  filtered = filtered.filter((c) => {
+    const overlap = calculateOverlapPenalty(c.route.geometry.coordinates)
+    return overlap <= MAX_OVERLAP
+  })
+
+  onProgress?.(
+    filtered.length < beforeOverlapFilter
+      ? `Rejected ${beforeOverlapFilter - filtered.length} U-turn routes...`
+      : 'Filtering routes...',
+    0.48
+  )
+
   if (filtered.length === 0) {
-    // If nothing matches, return whatever we have
-    const fallback = candidates.slice(0, 3)
-    if (fallback.length === 0) {
-      throw new Error('Could not generate any loop routes from this location')
+    // If all got filtered, try with a slightly looser threshold
+    const lenient = candidates.filter((c) => {
+      const overlap = calculateOverlapPenalty(c.route.geometry.coordinates)
+      return overlap <= 0.4 && c.route.duration >= minDuration && c.route.duration <= maxDuration
+    })
+    if (lenient.length > 0) {
+      filtered = lenient
+    } else {
+      // Last resort: return whatever has the lowest overlap
+      const withOverlap = candidates
+        .map((c) => ({ ...c, overlap: calculateOverlapPenalty(c.route.geometry.coordinates) }))
+        .filter((c) => c.route.duration >= minDuration * 0.5 && c.route.duration <= maxDuration * 1.2)
+        .sort((a, b) => a.overlap - b.overlap)
+        .slice(0, 3)
+      if (withOverlap.length === 0) {
+        throw new Error('Could not generate any non-overlapping loop routes from this location. Try a different spot or longer duration.')
+      }
+      filtered = withOverlap
     }
-    return scoreCandidates(fallback, start, onProgress)
   }
 
   // Sort by closeness to target duration, take top 6 for scoring
@@ -420,17 +446,13 @@ async function scoreCandidates(
       }
     }
 
-    // Calculate overlap / U-turn penalty
+    // Calculate overlap (mostly for display — hard filter already removed worst offenders)
     const overlapPenalty = calculateOverlapPenalty(route.geometry.coordinates)
 
-    // Apply overlap penalty to floorability score
-    // Heavy overlap (>60%) = major penalty, mild overlap (<20%) = minor
-    if (overlapPenalty > 0.15) {
-      const penaltyMultiplier = 1 - (overlapPenalty * 0.5) // 50% overlap = 25% score reduction
+    // Mild penalty for any remaining overlap that passed the hard filter
+    if (overlapPenalty > 0.1) {
+      const penaltyMultiplier = 1 - (overlapPenalty * 0.3)
       floorability.totalScore = Math.round(floorability.totalScore * penaltyMultiplier)
-      if (overlapPenalty > 0.4) {
-        floorability.bestMoment = `⚠️ ${Math.round(overlapPenalty * 100)}% road overlap (U-turn route). ${floorability.bestMoment}`
-      }
     }
 
     const durationMin = Math.round(route.duration / 60)
