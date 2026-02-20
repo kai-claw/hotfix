@@ -427,16 +427,18 @@ const ROUTE_COLORS = [
 
 /**
  * Generate nearby loop starting points (for "Nearby" mode).
+ * angleOffset rotates the search directions for variety on "Look Again".
  */
 function generateNearbyStartPoints(
   center: [number, number],
-  radiusMi: number
+  radiusMi: number,
+  angleOffset: number = 0
 ): [number, number][] {
   const [lng, lat] = center
   const latPerMile = 1 / 69
   const lngPerMile = 1 / (69 * Math.cos(lat * Math.PI / 180))
 
-  const nearbyAngles = [30, 90, 150, 210, 270, 330]
+  const nearbyAngles = [30, 90, 150, 210, 270, 330].map((a) => (a + angleOffset) % 360)
   const nearbyDistances = [0.4, 0.5, 0.6, 0.35, 0.55, 0.45]
 
   return nearbyAngles.map((angle, i) => {
@@ -466,7 +468,9 @@ export async function generateLoopRoutes(
   duration: LoopDuration = 30,
   _style: LoopStyle = 'best',
   onProgress?: (stage: string, progress: number) => void,
-  loopType: LoopType = 'anchor'
+  loopType: LoopType = 'anchor',
+  maxResults: number = 2,
+  angleOffset: number = 0
 ): Promise<LoopRoute[]> {
   const loopRadius = LOOP_RADIUS[duration]
   const triRadius = DURATION_RADIUS[duration]
@@ -474,16 +478,16 @@ export async function generateLoopRoutes(
 
   // For "nearby" mode, generate loops from different start points in the area
   if (loopType === 'nearby') {
-    return generateNearbyLoopRoutes(start, duration, onProgress)
+    return generateNearbyLoopRoutes(start, duration, onProgress, maxResults, angleOffset)
   }
 
   onProgress?.('Generating loop waypoints...', 0.05)
 
   const candidates: { route: MapboxRoute; waypoints: [number, number][]; method: string }[] = []
 
-  // ── FIX 2C: 4-waypoint loops at various angles and radii for maximum variety ──
-  // More configs = more chances to find a good loop in any road network
-  const quadConfigs = [
+  // ── 4-waypoint loops at various angles and radii ──
+  // angleOffset rotates all configs so "Look Again" explores new directions
+  const baseConfigs = [
     { angles: [0, 90, 180, 270], radiusFrac: 1.0, label: 'cardinal-100' },
     { angles: [45, 135, 225, 315], radiusFrac: 1.0, label: 'diagonal-100' },
     { angles: [0, 90, 180, 270], radiusFrac: 0.7, label: 'cardinal-70' },
@@ -497,6 +501,13 @@ export async function generateLoopRoutes(
     { angles: [20, 110, 200, 290], radiusFrac: 0.5, label: 'tight-50' },
     { angles: [70, 160, 250, 340], radiusFrac: 1.1, label: 'alt-110' },
   ]
+
+  // Apply angle offset — rotates all waypoint directions for variety on "Look Again"
+  const quadConfigs = baseConfigs.map((c) => ({
+    ...c,
+    angles: c.angles.map((a) => (a + angleOffset) % 360),
+    label: `${c.label}-r${angleOffset}`,
+  }))
 
   // ── FIX 2A: Use trip endpoint for round-trip optimization ──
   onProgress?.('Optimizing round trips...', 0.1)
@@ -586,9 +597,11 @@ export async function generateLoopRoutes(
   // Take the best ones, preferring diversity (not all the same shape)
   filtered = quality.slice(0, 8)
 
-  // Take top 6 for floorability scoring
-  const topCandidates = filtered.slice(0, 6)
-  return scoreCandidates(topCandidates, start, onProgress)
+  // Take top candidates for floorability scoring (limit to reduce API calls)
+  // Score a few extra to have fallbacks after min-score filtering
+  const scoreCount = Math.min(filtered.length, maxResults + 2)
+  const topCandidates = filtered.slice(0, scoreCount)
+  return scoreCandidates(topCandidates, start, onProgress, maxResults)
 }
 
 /**
@@ -628,11 +641,14 @@ async function exploreNearbyArea(
 async function generateNearbyLoopRoutes(
   center: [number, number],
   duration: LoopDuration,
-  onProgress?: (stage: string, progress: number) => void
+  onProgress?: (stage: string, progress: number) => void,
+  maxResults: number = 2,
+  angleOffset: number = 0
 ): Promise<LoopRoute[]> {
   const loopRadius = LOOP_RADIUS[duration]
   const triRadius = DURATION_RADIUS[duration]
-  const nearbyStarts = generateNearbyStartPoints(center, loopRadius * 2)
+  // Rotate nearby start angles for variety on "Look Again"
+  const nearbyStarts = generateNearbyStartPoints(center, loopRadius * 2, angleOffset)
 
   onProgress?.('Finding nearby loops...', 0.1)
 
@@ -684,15 +700,16 @@ async function generateNearbyLoopRoutes(
     return { ...c, quality }
   })
 
-  // Sort by quality, take top 6
+  // Sort by quality, take top candidates
   withQuality.sort((a, b) => b.quality - a.quality)
-  const sorted = withQuality.slice(0, 6)
+  const scoreCount = Math.min(withQuality.length, maxResults + 2)
+  const sorted = withQuality.slice(0, scoreCount)
 
   if (sorted.length === 0) {
     throw new Error('Could not find any loops in this area. Try a different location or longer duration.')
   }
 
-  return scoreCandidates(sorted, center, onProgress)
+  return scoreCandidates(sorted, center, onProgress, maxResults)
 }
 
 // ─── Scoring Pipeline ─────────────────────────────────
@@ -700,7 +717,8 @@ async function generateNearbyLoopRoutes(
 async function scoreCandidates(
   candidates: { route: MapboxRoute; waypoints: [number, number][]; method?: string }[],
   start: [number, number],
-  onProgress?: (stage: string, progress: number) => void
+  onProgress?: (stage: string, progress: number) => void,
+  maxResults: number = 2
 ): Promise<LoopRoute[]> {
   onProgress?.('Analyzing road data...', 0.5)
 
@@ -806,8 +824,8 @@ async function scoreCandidates(
 
   onProgress?.('Done!', 1.0)
 
-  // Return top 5
-  return finalRoutes.slice(0, 5)
+  // Return top results (default 2, user can "Look Again" for more)
+  return finalRoutes.slice(0, maxResults)
 }
 
 function categorizeLoop(f: FloorabilityResult): string {

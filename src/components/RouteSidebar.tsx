@@ -3,7 +3,7 @@ import { useIsMobile } from '../hooks/useMediaQuery'
 import RouteCard from './RouteCard'
 
 export default function RouteSidebar() {
-  const { mode, routes, loopRoutes, selectedRouteId, selectRoute, loadingState, loadingStage, loadingProgress, error, lowFloorabilityWarning } =
+  const { mode, routes, loopRoutes, selectedRouteId, selectRoute, loadingState, loadingStage, loadingProgress, error, lowFloorabilityWarning, lookAgain } =
     useRouteStore()
   const isMobile = useIsMobile()
 
@@ -143,6 +143,19 @@ export default function RouteSidebar() {
             isLoop={isLoop}
           />
         ))}
+
+        {/* Look Again button — loop mode only */}
+        {isLoop && displayRoutes.length > 0 && loadingState === 'success' && (
+          <button
+            onClick={() => void lookAgain()}
+            className={`w-full flex items-center justify-center gap-2 rounded-xl border border-[#2a2a3e] hover:border-[#ff2d55]/40 bg-[#1a1a2e]/60 hover:bg-[#ff2d55]/10 transition-all active:scale-[0.98] ${
+              isMobile ? 'py-3 text-sm' : 'py-3.5 text-sm'
+            }`}
+          >
+            <span className="text-base">🔄</span>
+            <span className="font-semibold text-[#a0a0b0]">Look Again</span>
+          </button>
+        )}
       </div>
 
       {/* Footer — desktop only */}

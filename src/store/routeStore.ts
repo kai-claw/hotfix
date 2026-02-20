@@ -33,6 +33,7 @@ interface RouteState {
   loadingProgress: number
   error: string | null
   lowFloorabilityWarning: boolean // Fix 3: true when all routes score below threshold
+  loopSearchRound: number // Tracks which "Look Again" round we're on
 
   // Actions
   setOrigin: (point: RoutePoint | null, name?: string) => void
@@ -40,6 +41,7 @@ interface RouteState {
   selectRoute: (id: string) => void
   calculateRoutes: () => Promise<void>
   calculateLoopRoutes: () => Promise<void>
+  lookAgain: () => Promise<void>
   clearRoutes: () => void
   swapLocations: () => void
 }
@@ -61,6 +63,7 @@ export const useRouteStore = create<RouteState>((set, get) => ({
   loadingProgress: 0,
   error: null,
   lowFloorabilityWarning: false,
+  loopSearchRound: 0,
 
   setMode: (mode) => {
     set({ mode, routes: [], loopRoutes: [], selectedRouteId: null, loadingState: 'idle', error: null })
@@ -145,6 +148,7 @@ export const useRouteStore = create<RouteState>((set, get) => ({
       loadingStage: 'Generating loops...',
       loadingProgress: 0,
       lowFloorabilityWarning: false,
+      loopSearchRound: 0,
     })
 
     try {
@@ -155,7 +159,9 @@ export const useRouteStore = create<RouteState>((set, get) => ({
         (stage, progress) => {
           set({ loadingStage: stage, loadingProgress: progress })
         },
-        loopType
+        loopType,
+        2,  // maxResults: only 2 loops initially
+        0   // angleOffset: first round, no rotation
       )
 
       // Fix 3: Check if all routes are below minimum score threshold
@@ -170,6 +176,54 @@ export const useRouteStore = create<RouteState>((set, get) => ({
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to generate loop routes'
+      set({ loadingState: 'error', error: message })
+    }
+  },
+
+  lookAgain: async () => {
+    const { origin, loopDuration, loopStyle, loopType, loopSearchRound } = get()
+    if (!origin) return
+
+    const nextRound = loopSearchRound + 1
+    // Each round rotates waypoint angles by 25° for different route directions
+    const angleOffset = nextRound * 25
+
+    set({
+      loadingState: 'loading',
+      error: null,
+      routes: [],
+      loopRoutes: [],
+      selectedRouteId: null,
+      loadingStage: 'Finding new loops...',
+      loadingProgress: 0,
+      lowFloorabilityWarning: false,
+      loopSearchRound: nextRound,
+    })
+
+    try {
+      const loops = await generateLoopRoutes(
+        [origin.lng, origin.lat],
+        loopDuration,
+        loopStyle,
+        (stage, progress) => {
+          set({ loadingStage: stage, loadingProgress: progress })
+        },
+        loopType,
+        2,           // maxResults: still 2 at a time
+        angleOffset  // rotated directions for variety
+      )
+
+      const allLowScore = loops.length > 0 && loops.every((l) => l.floorability.totalScore < 25)
+
+      set({
+        loopRoutes: loops,
+        routes: loops,
+        selectedRouteId: loops[0]?.id || null,
+        loadingState: 'success',
+        lowFloorabilityWarning: allLowScore,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'No more loops found. Try a different location or duration.'
       set({ loadingState: 'error', error: message })
     }
   },

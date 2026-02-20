@@ -61,18 +61,33 @@ function sampleWaypoints(
 
 /**
  * Generate Apple Maps URL
- * Uses maps.apple.com which opens Apple Maps app on iOS
+ * Uses maps.apple.com which opens Apple Maps app on iOS.
+ * 
+ * Apple Maps only reliably supports ~3-5 stops via URL.
+ * We use 4 carefully-chosen waypoints (key turns) so the route
+ * actually renders instead of silently failing.
  */
 export function getAppleMapsUrl(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
   if (coords.length < 2) return ''
 
   const start = coords[0]
-  // Use more waypoints for accuracy (Apple Maps handles long URLs well)
-  const waypoints = sampleWaypoints(coords, 15)
+  const end = coords[coords.length - 1]
+  // Apple Maps chokes on many waypoints — use 4 key turn points max
+  const waypoints = sampleWaypoints(coords, 6) // start + 4 mid + end
 
-  const waypointStr = waypoints
-    .slice(1)
+  // Build daddr with +to: separator (skip start, include all stops through end)
+  const stops = waypoints.slice(1)
+  
+  // Check if route is a loop (start ≈ end)
+  const isLoop = Math.abs(start[0] - end[0]) < 0.001 && Math.abs(start[1] - end[1]) < 0.001
+  
+  // For loops, make sure the last stop is the start point
+  if (isLoop) {
+    stops[stops.length - 1] = start
+  }
+
+  const waypointStr = stops
     .map(([lng, lat]) => `${lat},${lng}`)
     .join('+to:')
 
