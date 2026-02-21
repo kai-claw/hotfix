@@ -134,16 +134,36 @@ async function fetchLoopRoute(
 }
 
 /**
+ * Sort waypoints in clockwise order around a center point.
+ * This forces OSRM to route in a circular direction rather than zigzagging,
+ * which is the primary cause of panhandle routes.
+ */
+function sortWaypointsClockwise(
+  center: [number, number],
+  waypoints: [number, number][]
+): [number, number][] {
+  const [cx, cy] = center
+  return [...waypoints].sort((a, b) => {
+    const angleA = Math.atan2(a[1] - cy, a[0] - cx)
+    const angleB = Math.atan2(b[1] - cy, b[0] - cx)
+    return angleB - angleA // clockwise (descending angle)
+  })
+}
+
+/**
  * Fetch a round-trip route using OSRM's trip endpoint (Fix 2A)
  * Falls back to regular route endpoint on failure.
  * Uses osrmFetch for automatic failover between servers.
+ * FIX 5: Waypoints are sorted clockwise to force circular routing.
  */
 async function fetchTripRoute(
   start: [number, number],
   waypoints: [number, number][]
 ): Promise<MapboxRoute | null> {
   try {
-    const coords = [start, ...waypoints]
+    // FIX 5: Sort waypoints clockwise around start to force circular direction
+    const orderedWps = sortWaypointsClockwise(start, waypoints)
+    const coords = [start, ...orderedWps]
       .map(([lng, lat]) => `${lng},${lat}`)
       .join(';')
     const response = await osrmFetch(tripPath(coords))
@@ -294,9 +314,9 @@ function calculateOverlapPenalty(coords: [number, number][]): number {
 function detectLocalTurnarounds(coords: [number, number][]): number {
   if (coords.length < 40) return 0
 
-  const CLOSE_DEG = 0.0007 // ~80m proximity threshold
+  const CLOSE_DEG = 0.001 // ~110m proximity threshold (was 0.0007/~80m — wider net catches offset lanes)
   const MIN_SEPARATION = Math.max(10, Math.floor(coords.length * 0.05)) // at least 5% of route apart
-  const sampleStep = Math.max(1, Math.floor(coords.length / 150)) // sample ~150 points
+  const sampleStep = Math.max(1, Math.floor(coords.length / 200)) // sample ~200 points (was 150 — denser sampling)
   const headingGap = Math.max(3, Math.floor(coords.length / 100)) // gap for heading calc
 
   // Pre-compute headings at sampled points
@@ -321,23 +341,24 @@ function detectLocalTurnarounds(coords: [number, number][]): number {
       const dLng = Math.abs(samples[a].lng - samples[b].lng)
       if (dLat > CLOSE_DEG || dLng > CLOSE_DEG) continue
 
-      // Check heading opposition (> 120° = roughly opposite)
+      // Check heading opposition (> 100° = roughly opposite, was 120° — catches more backtracking)
       let headingDiff = Math.abs(samples[a].heading - samples[b].heading)
       if (headingDiff > Math.PI) headingDiff = 2 * Math.PI - headingDiff
-      if (headingDiff > (2 * Math.PI / 3)) { // 120 degrees
+      if (headingDiff > (5 * Math.PI / 9)) { // 100 degrees (was 120°)
         backtrackPoints++
       }
     }
   }
 
   // Normalize: even a few backtrack detections = significant panhandle
-  // 150 samples → max ~11000 pairs. A panhandle typically triggers 5-30 pairs.
-  // Scale so that 3+ detections = noticeable penalty, 10+ = heavy
+  // 200 samples → more pairs checked. A panhandle typically triggers 5-40 pairs.
+  // FIX 5: More aggressive — 2 detections is already a real panhandle
   if (backtrackPoints === 0) return 0
-  if (backtrackPoints <= 2) return 0.15
-  if (backtrackPoints <= 5) return 0.35
-  if (backtrackPoints <= 10) return 0.55
-  if (backtrackPoints <= 20) return 0.75
+  if (backtrackPoints <= 1) return 0.15
+  if (backtrackPoints <= 3) return 0.30
+  if (backtrackPoints <= 6) return 0.50
+  if (backtrackPoints <= 12) return 0.70
+  if (backtrackPoints <= 20) return 0.85
   return 0.95
 }
 
@@ -559,12 +580,69 @@ export async function generateLoopRoutes(
   })
 
   // Hard reject routes with ANY backtracking or no circularity
-  // Overlap > 0.20 = panhandle detected via heading analysis → reject
-  let quality = scored.filter((c) => c.overlap <= 0.20 && c.circ >= 0.05)
+  // FIX 5: Tighter threshold — overlap > 0.15 = panhandle detected → reject (was 0.20)
+  let quality = scored.filter((c) => c.overlap <= 0.15 && c.circ >= 0.05)
 
-  // If nothing passes even the loose filter, take everything
+  // FIX 5: Don't silently serve panhandled routes — retry with different params
   if (quality.length === 0) {
-    quality = scored
+    onProgress?.('All routes had backtracking — retrying with tighter loops...', 0.38)
+    
+    // Retry with smaller radius and shifted angles to escape road network constraints
+    const retryRadius = loopRadius * 0.5
+    const retryAngleShift = 45
+    const retryConfigs = [
+      { angles: [0 + retryAngleShift, 90 + retryAngleShift, 180 + retryAngleShift, 270 + retryAngleShift], radiusFrac: 1.0 },
+      { angles: [0, 90, 180, 270], radiusFrac: 0.6 },
+      { angles: [30, 120, 210, 300], radiusFrac: 0.8 },
+      { angles: [60, 150, 240, 330], radiusFrac: 0.5 },
+      { angles: [15, 105, 195, 285], radiusFrac: 0.4 },
+      { angles: [0, 90, 180, 270], radiusFrac: 0.35 },
+    ].map((c) => ({
+      ...c,
+      angles: c.angles.map((a) => (a + angleOffset) % 360),
+    }))
+
+    const retryWps = retryConfigs.map((config) =>
+      generateWaypoints(start, retryRadius * config.radiusFrac, config.angles)
+    )
+    const retryResults = await Promise.all(
+      retryConfigs.map((_, j) => fetchTripRoute(start, retryWps[j]))
+    )
+    
+    const retryCandidates: typeof candidates = []
+    for (let j = 0; j < retryResults.length; j++) {
+      const route = retryResults[j]
+      if (route && route.duration >= targetDurationSec * 0.3 && route.duration <= targetDurationSec * 2.5) {
+        retryCandidates.push({ route, waypoints: retryWps[j], method: `retry-${j}` })
+      }
+    }
+
+    if (retryCandidates.length > 0) {
+      const retryScored = retryCandidates.map((c) => {
+        const circ = calculateCircularity(c.route.geometry.coordinates)
+        const overlap = calculateOverlapPenalty(c.route.geometry.coordinates)
+        const durationFit = 1 - Math.abs(c.route.duration - targetDurationSec) / targetDurationSec
+        const q = (circ * 0.45) + ((1 - overlap) * 0.35) + (Math.max(0, durationFit) * 0.2)
+        return { ...c, circ, overlap, quality: q }
+      })
+
+      // Accept retry routes that pass the filter
+      const retryGood = retryScored.filter((c) => c.overlap <= 0.15 && c.circ >= 0.05)
+      if (retryGood.length > 0) {
+        retryGood.sort((a, b) => b.quality - a.quality)
+        quality = retryGood
+      }
+    }
+
+    // If STILL nothing clean, take the least-panhandled routes with a warning
+    if (quality.length === 0) {
+      scored.sort((a, b) => a.overlap - b.overlap)
+      quality = scored.slice(0, Math.max(maxResults, 3))
+      // Mark them so the UI can warn the user
+      for (const q of quality) {
+        (q as Record<string, unknown>)._panhandleWarning = true
+      }
+    }
   }
 
   // Sort by quality descending
@@ -584,7 +662,9 @@ export async function generateLoopRoutes(
     throw new Error('Routing service unavailable or no valid routes in this area. Try again in a moment.')
   }
 
-  return scoreCandidates(topCandidates, start, onProgress, maxResults)
+  // Pass panhandle warning flag through to scoreCandidates
+  const hasPanhandleWarning = quality.some((q: Record<string, unknown>) => q._panhandleWarning === true)
+  return scoreCandidates(topCandidates, start, onProgress, maxResults, hasPanhandleWarning)
 }
 
 /**
@@ -701,7 +781,8 @@ async function scoreCandidates(
   candidates: { route: MapboxRoute; waypoints: [number, number][]; method?: string }[],
   start: [number, number],
   onProgress?: (stage: string, progress: number) => void,
-  maxResults: number = 2
+  maxResults: number = 2,
+  panhandleWarning: boolean = false
 ): Promise<LoopRoute[]> {
   onProgress?.('Analyzing road data...', 0.5)
 
@@ -785,10 +866,18 @@ async function scoreCandidates(
 
   // If all routes are below threshold, mark them (store will show warning)
   if (aboveThreshold.length === 0 && scored.length > 0) {
-    // Add a hint to the highlights of each route
     for (const route of finalRoutes) {
       if (!route.highlights.includes('⚠️ Limited floor-it opportunities')) {
         route.highlights.unshift('⚠️ Limited floor-it opportunities')
+      }
+    }
+  }
+
+  // FIX 5: If all routes had panhandles and we're showing best-of-bad, warn user
+  if (panhandleWarning) {
+    for (const route of finalRoutes) {
+      if (!route.highlights.includes('⚠️ Road network limits loop options here')) {
+        route.highlights.unshift('⚠️ Road network limits loop options here')
       }
     }
   }

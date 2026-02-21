@@ -130,23 +130,123 @@ export function getAppleMapsUrl(route: ScoredRoute): string {
 }
 
 /**
+ * For loop routes, find critical "divergence points" where the outbound
+ * and return paths separate. These MUST be included as waypoints in
+ * Google Maps export, otherwise GM will re-route through a panhandle.
+ * 
+ * Strategy: scan the first 30% and last 30% of the route for points
+ * that are geographically close but at different route positions.
+ * The point just AFTER the outbound/return paths diverge is critical.
+ */
+function findLoopDivergencePoints(coords: [number, number][]): number[] {
+  if (coords.length < 50) return []
+
+  const CLOSE_DEG = 0.0008 // ~90m
+  const criticalIndices: number[] = []
+
+  // Check first 35% of route against last 35% (reversed)
+  const earlyEnd = Math.floor(coords.length * 0.35)
+  const lateStart = Math.floor(coords.length * 0.65)
+  const step = Math.max(1, Math.floor(coords.length / 200))
+
+  // Find where outbound path is close to return path
+  let lastCloseEarly = -1
+  for (let i = 0; i < earlyEnd; i += step) {
+    for (let j = coords.length - 1; j >= lateStart; j -= step) {
+      const dLat = Math.abs(coords[i][1] - coords[j][1])
+      const dLng = Math.abs(coords[i][0] - coords[j][0])
+      if (dLat < CLOSE_DEG && dLng < CLOSE_DEG) {
+        if (i > lastCloseEarly) lastCloseEarly = i
+        break
+      }
+    }
+  }
+
+  // The divergence point is just AFTER the last close point in the early section
+  if (lastCloseEarly > 0 && lastCloseEarly < earlyEnd) {
+    // Add the point where paths split (a bit after the last overlap)
+    const divergeIdx = Math.min(coords.length - 1, lastCloseEarly + Math.floor(coords.length * 0.05))
+    criticalIndices.push(divergeIdx)
+    // Also add a point just before convergence on the return leg
+    const convergeIdx = Math.max(0, coords.length - divergeIdx)
+    if (convergeIdx > lateStart) {
+      criticalIndices.push(convergeIdx)
+    }
+  }
+
+  return criticalIndices
+}
+
+/**
  * Generate Google Maps URL — PRIMARY NAV EXPORT
  * 
  * Uses the path-based format: /maps/dir/lat,lng/lat,lng/...
  * This is the same format Google Maps generates when sharing routes.
  * Supports ~23 waypoints, no query encoding issues.
  * We use 20 turn-sampled waypoints for high route fidelity.
+ * 
+ * FIX 5: For loops, critical divergence points are prioritized to prevent
+ * Google Maps from re-routing into panhandles.
  */
 export function getGoogleMapsUrl(route: ScoredRoute): string {
   const coords = route.mapboxRoute.geometry.coordinates
   if (coords.length < 2) return ''
 
+  const isLoop = isLoopRoute(coords)
+
+  // For loops, find divergence points that MUST be included
+  const criticalIndices = isLoop ? findLoopDivergencePoints(coords) : []
+
   // 20 waypoints for excellent route reproduction
   const waypoints = sampleWaypoints(coords, 20)
 
-  // For loops, ensure the last point returns to start
-  if (isLoopRoute(coords)) {
+  // For loops, inject critical divergence waypoints if not already present
+  if (isLoop && criticalIndices.length > 0) {
+    for (const idx of criticalIndices) {
+      const criticalPt = coords[idx]
+      // Check if any existing waypoint is close enough
+      const alreadyCovered = waypoints.some(([lng, lat]) =>
+        Math.abs(lng - criticalPt[0]) < 0.0005 && Math.abs(lat - criticalPt[1]) < 0.0005
+      )
+      if (!alreadyCovered && waypoints.length < 22) {
+        // Insert at the right position to maintain route order
+        let insertAt = 0
+        for (let i = 0; i < waypoints.length; i++) {
+          // Find closest existing waypoint by route index approximation
+          const dist = Math.abs(coords.indexOf(waypoints[i]) - idx)
+          if (dist < Math.abs(coords.indexOf(waypoints[insertAt]) - idx)) {
+            insertAt = i
+          }
+        }
+        waypoints.splice(insertAt + 1, 0, criticalPt)
+      }
+    }
+
+    // Ensure the last point returns to start
     waypoints[waypoints.length - 1] = waypoints[0]
+  } else if (isLoop) {
+    waypoints[waypoints.length - 1] = waypoints[0]
+  }
+
+  // Trim back to 23 max (Google Maps limit) if we added divergence points
+  while (waypoints.length > 23) {
+    // Remove the point closest to its neighbors (least information loss)
+    let minLoss = Infinity
+    let removeIdx = 1 // never remove first/last
+    for (let i = 1; i < waypoints.length - 1; i++) {
+      const loss = Math.hypot(
+        waypoints[i][0] - waypoints[i - 1][0],
+        waypoints[i][1] - waypoints[i - 1][1]
+      ) + Math.hypot(
+        waypoints[i + 1][0] - waypoints[i][0],
+        waypoints[i + 1][1] - waypoints[i][1]
+      )
+      if (loss < minLoss) {
+        minLoss = loss
+        removeIdx = i
+      }
+    }
+    waypoints.splice(removeIdx, 1)
   }
 
   // Path-based format — each coordinate is a path segment
