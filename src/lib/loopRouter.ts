@@ -280,55 +280,65 @@ function calculateOverlapPenalty(coords: [number, number][]): number {
 }
 
 /**
- * Detect local turnarounds (panhandles) — segments where the route goes out
- * to a dead end and doubles back on itself. Returns a penalty 0-1.
+ * Detect backtracking / panhandles by finding segments where the route
+ * passes near the same geographic point traveling in OPPOSITE directions.
  * 
- * Stricter than before: even a single panhandle segment is penalized heavily
- * because it ruins the driving experience (you KNOW you're backtracking).
+ * This catches what proximity-only detection misses: a panhandle goes OUT
+ * on a road and comes BACK on the same road. The key signature is:
+ *   - Two points are geographically close (< 80m)
+ *   - Their travel headings are roughly opposite (> 120° difference)
+ *   - They're separated by enough route distance to not be a crossing
+ * 
+ * Returns 0 (clean loop) to 1 (heavy backtracking).
  */
 function detectLocalTurnarounds(coords: [number, number][]): number {
-  if (coords.length < 30) return 0
+  if (coords.length < 40) return 0
 
-  const CLOSE_THRESHOLD_DEG = 0.0006 // ~65m — slightly wider to catch near-misses
-  // Check windows of ~4% of the route length (was 5% — tighter scanning)
-  const windowSize = Math.max(8, Math.floor(coords.length * 0.04))
-  const step = Math.max(1, Math.floor(windowSize / 4))
+  const CLOSE_DEG = 0.0007 // ~80m proximity threshold
+  const MIN_SEPARATION = Math.max(10, Math.floor(coords.length * 0.05)) // at least 5% of route apart
+  const sampleStep = Math.max(1, Math.floor(coords.length / 150)) // sample ~150 points
+  const headingGap = Math.max(3, Math.floor(coords.length / 100)) // gap for heading calc
 
-  let turnaroundSegments = 0
-  let totalChecks = 0
+  // Pre-compute headings at sampled points
+  const samples: { idx: number; lng: number; lat: number; heading: number }[] = []
+  for (let i = 0; i < coords.length - headingGap; i += sampleStep) {
+    const dx = coords[i + headingGap][0] - coords[i][0]
+    const dy = coords[i + headingGap][1] - coords[i][1]
+    const heading = Math.atan2(dy, dx) // radians
+    samples.push({ idx: i, lng: coords[i][0], lat: coords[i][1], heading })
+  }
 
-  // For each point, check if there's a point AHEAD in the route (by 1.5-5 windows)
-  // that's geographically close — meaning the route came back to this spot
-  for (let i = 0; i < coords.length - windowSize * 2; i += step) {
-    totalChecks++
+  let backtrackPoints = 0
 
-    // Search range: 1.5 to 6 windows ahead (was 2-5 — catch shorter panhandles)
-    const searchStart = i + Math.floor(windowSize * 1.5)
-    const searchEnd = Math.min(coords.length, i + windowSize * 6)
+  // Check all pairs of sampled points
+  for (let a = 0; a < samples.length; a++) {
+    for (let b = a + 1; b < samples.length; b++) {
+      // Must be far enough apart in route sequence
+      if (samples[b].idx - samples[a].idx < MIN_SEPARATION) continue
 
-    for (let j = searchStart; j < searchEnd; j += step) {
-      const dLat = Math.abs(coords[i][1] - coords[j][1])
-      const dLng = Math.abs(coords[i][0] - coords[j][0])
+      // Check geographic proximity
+      const dLat = Math.abs(samples[a].lat - samples[b].lat)
+      const dLng = Math.abs(samples[a].lng - samples[b].lng)
+      if (dLat > CLOSE_DEG || dLng > CLOSE_DEG) continue
 
-      if (dLat < CLOSE_THRESHOLD_DEG && dLng < CLOSE_THRESHOLD_DEG) {
-        // Verify: the midpoint must be farther away (route went OUT and came BACK)
-        const midIdx = Math.floor((i + j) / 2)
-        const midDist = Math.sqrt(
-          (coords[midIdx][0] - coords[i][0]) ** 2 +
-          (coords[midIdx][1] - coords[i][1]) ** 2
-        )
-        if (midDist > CLOSE_THRESHOLD_DEG * 2.5) {
-          turnaroundSegments++
-        }
-        break
+      // Check heading opposition (> 120° = roughly opposite)
+      let headingDiff = Math.abs(samples[a].heading - samples[b].heading)
+      if (headingDiff > Math.PI) headingDiff = 2 * Math.PI - headingDiff
+      if (headingDiff > (2 * Math.PI / 3)) { // 120 degrees
+        backtrackPoints++
       }
     }
   }
 
-  const turnaroundRatio = totalChecks > 0 ? turnaroundSegments / totalChecks : 0
-  // Much harsher scaling: even 5% turnaround = heavy penalty (was 10% = significant)
-  // A single panhandle is highly visible and ruins the experience
-  return Math.min(1, turnaroundRatio * 5)
+  // Normalize: even a few backtrack detections = significant panhandle
+  // 150 samples → max ~11000 pairs. A panhandle typically triggers 5-30 pairs.
+  // Scale so that 3+ detections = noticeable penalty, 10+ = heavy
+  if (backtrackPoints === 0) return 0
+  if (backtrackPoints <= 2) return 0.15
+  if (backtrackPoints <= 5) return 0.35
+  if (backtrackPoints <= 10) return 0.55
+  if (backtrackPoints <= 20) return 0.75
+  return 0.95
 }
 
 // ─── Route Naming ─────────────────────────────────────
@@ -548,9 +558,9 @@ export async function generateLoopRoutes(
     return { ...c, circ, overlap, quality }
   })
 
-  // Hard reject routes with significant backtracking or no circularity
-  // Tightened from 0.5 → 0.35 overlap threshold — panhandles are unacceptable
-  let quality = scored.filter((c) => c.overlap <= 0.35 && c.circ >= 0.05)
+  // Hard reject routes with ANY backtracking or no circularity
+  // Overlap > 0.20 = panhandle detected via heading analysis → reject
+  let quality = scored.filter((c) => c.overlap <= 0.20 && c.circ >= 0.05)
 
   // If nothing passes even the loose filter, take everything
   if (quality.length === 0) {
